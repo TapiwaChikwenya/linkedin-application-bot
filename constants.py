@@ -6,8 +6,9 @@ jobsPerPage = 25
 
 fast = 2
 medium = 3
-slow = 5 
+slow = 20
 
-botSpeed = slow
+# Random page delay is now 1-2 seconds instead of 1-20 seconds.
+botSpeed = fast
 
 # TO DO ADD OTHER PRINT CONSTANTS

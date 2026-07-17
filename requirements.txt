@@ -1,0 +1,3 @@
+selenium>=4.18,<5
+webdriver-manager>=4,<5
+python-dotenv>=1,<2

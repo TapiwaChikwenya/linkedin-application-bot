@@ -7,19 +7,14 @@ from selenium.webdriver.firefox.options import Options
 def browserOptions():
     options = Options()
     firefoxProfileRootDir = config.firefoxProfileRootDir
-    options.add_argument("--start-maximized")
-    options.add_argument("--ignore-certificate-errors")
-    options.add_argument('--no-sandbox')
-    options.add_argument("--disable-extensions")
-    options.add_argument('--disable-gpu')
     if(config.headless):
         options.add_argument("--headless")
 
-    options.add_argument("--disable-blink-features")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--incognito")
-    options.add_argument("-profile")
-    options.add_argument(firefoxProfileRootDir)
+    # Reuse the configured profile so an existing LinkedIn login is retained.
+    # Incognito and Chromium-only arguments prevented this from working reliably.
+    if firefoxProfileRootDir:
+        options.add_argument("-profile")
+        options.add_argument(firefoxProfileRootDir)
 
     return options
 

@@ -167,9 +167,25 @@ pytransform/
 #config file
 mainConfig.py
 
+# Local runtime data and secrets
+.env
+data/
+debug_page_source.html
+debug_screenshot.png
+easy_apply_failure_*.html
+easy_apply_failure_*.png
+__pycache__/
+*.egg-info/
+
+# Local experiments and unrelated projects
+linkedin2.py
+Linkedin3.py
+Premier-League-API/
+
 # user files
 geckodriver.log
 *.txt
+!requirements.txt
 *.exe
 
 # premium files
