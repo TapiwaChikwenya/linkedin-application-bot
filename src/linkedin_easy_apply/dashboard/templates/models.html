@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}Settings · APPLY/OPS{% endblock %}
+{% block content %}
+  <div class="settings-grid">
+    <div>
+      <section class="memory-panel">
+        <h2>Ollama models</h2>
+        <p class="muted">Picker writes local SQLite. It does not edit config.py. OLLAMA_MODEL is the fallback.</p>
+        <div class="toolbar">
+          <select id="modelSelect"></select>
+          <button id="useModelBtn" class="seed-btn" type="button">Use model</button>
+          <span class="muted" id="modelStatus"></span>
+        </div>
+        <div class="toolbar">
+          <input id="pullName" type="text" placeholder="llama3.2, llama3.1, llama3.2-vision" spellcheck="false">
+          <button id="pullBtn" class="btn-ghost" type="button">Pull model</button>
+          <span class="muted" id="pullStatus"></span>
+        </div>
+      </section>
+      <section class="memory-panel">
+        <h2>Caps</h2>
+        <p class="muted">Daily and per-run apply limits. Worker reads these instead of only env/config.</p>
+        <div class="toolbar">
+          <label class="muted">Day <input id="dayCap" type="number" min="0" max="500" style="width:8ch"></label>
+          <label class="muted">Run <input id="runCap" type="number" min="0" max="500" style="width:8ch"></label>
+          <button id="saveCapsBtn" class="btn-ghost" type="button">Save caps</button>
+          <span class="muted" id="capStatus"></span>
+        </div>
+      </section>
+      <section class="memory-panel">
+        <h2>Schedule</h2>
+        <p class="muted">Machine local time. Empty = manual Start only. Auto Start/Stop uses the same header buttons. 00:00–23:59 is all day.</p>
+        <div class="toolbar" id="dayChips">
+          <button class="chip" type="button" data-day="0">mon</button>
+          <button class="chip" type="button" data-day="1">tue</button>
+          <button class="chip" type="button" data-day="2">wed</button>
+          <button class="chip" type="button" data-day="3">thu</button>
+          <button class="chip" type="button" data-day="4">fri</button>
+          <button class="chip" type="button" data-day="5">sat</button>
+          <button class="chip" type="button" data-day="6">sun</button>
+        </div>
+        <div class="toolbar">
+          <input id="schedStart" type="time" value="09:00">
+          <input id="schedEnd" type="time" value="17:00">
+          <button id="saveSchedBtn" class="btn-ghost" type="button">Save window</button>
+          <button id="clearSchedBtn" class="btn-ghost" type="button">Clear (manual)</button>
+          <span class="muted" id="schedStatus"></span>
+        </div>
+      </section>
+      <section class="memory-panel">
+        <h2>Resume PDF</h2>
+        <p class="muted">Saved under data/resumes/ (gitignored). Active path is used for Easy Apply and Llama facts.</p>
+        <div class="toolbar">
+          <input id="resumeFile" type="file" accept="application/pdf,.pdf">
+          <button id="uploadResumeBtn" class="seed-btn" type="button">Upload PDF</button>
+          <span class="muted" id="resumeStatus"></span>
+        </div>
+        <div class="wrap" style="max-height:28vh">
+          <table>
+            <thead>
+              <tr><th>File</th><th>Size</th><th></th></tr>
+            </thead>
+            <tbody id="resumeRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <section class="memory-panel">
+      <h2>Model chat</h2>
+      <p class="muted">Test answers and instructions. History is local SQLite. Resume text is omitted unless you attach it. Passwords are never sent.</p>
+      <div class="chat-log" id="chatLog"><div class="muted">No messages yet.</div></div>
+      <div class="toolbar" style="margin-top:8px">
+        <textarea id="chatInput" rows="3" placeholder="Ask the selected model…" style="flex:1;min-width:12ch"></textarea>
+      </div>
+      <div class="toolbar">
+        <label class="muted"><input id="attachResume" type="checkbox"> attach resume excerpt</label>
+        <button id="chatSend" class="seed-btn" type="button">Send</button>
+        <button id="saveSummaryBtn" class="btn-ghost" type="button">Save last to summary</button>
+        <button id="saveSeedBtn" class="btn-ghost" type="button">Save last as seed</button>
+        <span class="muted" id="chatStatus"></span>
+      </div>
+    </section>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+const selectedDays = new Set([0,1,2,3,4]);
+let lastAssistant = "";
+function formatSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+function paintDays() {
+  document.querySelectorAll("#dayChips .chip").forEach(btn => {
+    const day = Number(btn.dataset.day);
+    btn.classList.toggle("active", selectedDays.has(day));
+  });
+}
+function renderChat(messages) {
+  const logEl = document.getElementById("chatLog");
+  const rows = messages || [];
+  if (!rows.length) {
+    logEl.innerHTML = `<div class="muted">No messages yet.</div>`;
+    return;
+  }
+  lastAssistant = "";
+  logEl.innerHTML = rows.map(row => {
+    if (row.role === "assistant") lastAssistant = String(row.content || "");
+    return `<div class="chat-msg ${esc(row.role || "")}"><span class="k">${esc(row.role || "")}</span><div>${esc(row.content || "")}</div></div>`;
+  }).join("");
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function renderResumes(items) {
+  const rows = items || [];
+  document.getElementById("resumeRows").innerHTML = rows.map(item => `
+    <tr>
+      <td>${esc(item.name)}${item.active ? ' <span class="pill apply">active</span>' : ""}</td>
+      <td class="muted">${formatSize(item.size)}</td>
+      <td class="row-actions">
+        ${item.active ? "" : `<button class="btn-ghost" type="button" data-activate="${esc(item.name)}">Use</button>`}
+        <button class="reject" type="button" data-delete="${esc(item.name)}">Delete</button>
+      </td>
+    </tr>
+  `).join("") || `<tr><td colspan="3" class="muted">No uploaded PDFs yet.</td></tr>`;
+}
+function fillModels(models, active) {
+  const select = document.getElementById("modelSelect");
+  const names = Array.from(new Set([...(models || []), active].filter(Boolean)));
+  select.innerHTML = names.map(name =>
+    `<option value="${esc(name)}"${name === active ? " selected" : ""}>${esc(name)}</option>`
+  ).join("") || `<option value="">(none pulled)</option>`;
+}
+async function loadSettings() {
+  const settings = await fetch("/api/settings").then(r => r.json()).catch(() => ({}));
+  const quota = settings.quota || {};
+  document.getElementById("dayCap").value = quota.max_per_day ?? 25;
+  document.getElementById("runCap").value = quota.max_per_run ?? 12;
+  const windows = (settings.schedule && settings.schedule.windows) || [];
+  if (windows[0]) {
+    selectedDays.clear();
+    (windows[0].days || []).forEach(day => selectedDays.add(Number(day)));
+    document.getElementById("schedStart").value = windows[0].start || "09:00";
+    document.getElementById("schedEnd").value = windows[0].end || "17:00";
+    document.getElementById("schedStatus").textContent = settings.schedule.reason || "";
+  } else {
+    document.getElementById("schedStatus").textContent = "manual Start only";
+  }
+  paintDays();
+  renderResumes(settings.resumes || []);
+  const models = await fetch("/api/models").then(async r => {
+    const payload = await r.json().catch(() => ({}));
+    payload._http = r.status;
+    return payload;
+  }).catch(() => ({ok: false, models: [], error: "Ollama not reachable"}));
+  fillModels(models.models || [], settings.ollama_model || models.active || "");
+  document.getElementById("modelStatus").textContent = models.ok === false
+    ? (models.error || "Ollama down")
+    : ("active " + (settings.ollama_model || models.active || "—"));
+  if (models.pulling) {
+    document.getElementById("pullStatus").textContent =
+      "pulling " + (models.pull_model || "") + (models.pull_progress ? " " + models.pull_progress : "");
+  }
+  const chat = await fetch("/api/models/chat").then(r => r.json()).catch(() => ({messages: []}));
+  renderChat(chat.messages || []);
+}
+document.getElementById("dayChips").onclick = (event) => {
+  const btn = event.target.closest("[data-day]");
+  if (!btn) return;
+  const day = Number(btn.dataset.day);
+  if (selectedDays.has(day)) selectedDays.delete(day);
+  else selectedDays.add(day);
+  paintDays();
+};
+document.getElementById("useModelBtn").onclick = async () => {
+  const model = document.getElementById("modelSelect").value;
+  const result = await api("POST", "/api/models/active", {model});
+  document.getElementById("modelStatus").textContent = result.ok ? ("active " + model) : (result.error || "failed");
+  await refreshHeader();
+};
+document.getElementById("pullBtn").onclick = async () => {
+  const model = document.getElementById("pullName").value.trim() || document.getElementById("modelSelect").value;
+  document.getElementById("pullStatus").textContent = "starting pull…";
+  const result = await api("POST", "/api/models/pull", {model});
+  document.getElementById("pullStatus").textContent = result.ok
+    ? ("pulling " + (result.model || model) + " — watch Live ticker")
+    : (result.error || "pull failed");
+  await refreshHeader();
+};
+document.getElementById("saveCapsBtn").onclick = async () => {
+  const result = await api("POST", "/api/settings", {
+    max_applications_per_day: Number(document.getElementById("dayCap").value),
+    max_applications_per_run: Number(document.getElementById("runCap").value)
+  });
+  document.getElementById("capStatus").textContent = result.error || "saved";
+  await refreshHeader();
+};
+document.getElementById("saveSchedBtn").onclick = async () => {
+  const result = await api("POST", "/api/settings", {
+    schedule_windows: [{
+      days: Array.from(selectedDays).sort((a, b) => a - b),
+      start: document.getElementById("schedStart").value || "09:00",
+      end: document.getElementById("schedEnd").value || "17:00"
+    }]
+  });
+  document.getElementById("schedStatus").textContent = result.error || (result.schedule && result.schedule.reason) || "saved";
+  await refreshHeader();
+};
+document.getElementById("clearSchedBtn").onclick = async () => {
+  const result = await api("POST", "/api/settings", {schedule_windows: []});
+  document.getElementById("schedStatus").textContent = result.error || "manual Start only";
+  await refreshHeader();
+};
+document.getElementById("uploadResumeBtn").onclick = async () => {
+  const input = document.getElementById("resumeFile");
+  if (!input.files || !input.files[0]) {
+    document.getElementById("resumeStatus").textContent = "choose a PDF";
+    return;
+  }
+  const body = new FormData();
+  body.append("file", input.files[0]);
+  const response = await fetchWithTimeout("/api/resumes", {method: "POST", body}, 15000);
+  const payload = await response.json().catch(() => ({}));
+  document.getElementById("resumeStatus").textContent = response.ok ? ("active " + (payload.name || "")) : (payload.detail || payload.error || "upload failed");
+  await loadSettings();
+};
+document.getElementById("resumeRows").onclick = async (event) => {
+  const activate = event.target.closest("[data-activate]");
+  const remove = event.target.closest("[data-delete]");
+  if (activate) {
+    await api("POST", "/api/resumes/active", {name: activate.dataset.activate});
+  } else if (remove) {
+    await fetchWithTimeout("/api/resumes/" + encodeURIComponent(remove.dataset.delete), {method: "DELETE"}, 8000);
+  } else {
+    return;
+  }
+  await loadSettings();
+};
+document.getElementById("chatSend").onclick = async () => {
+  const input = document.getElementById("chatInput");
+  const message = input.value.trim();
+  if (!message) return;
+  document.getElementById("chatStatus").textContent = "thinking…";
+  document.getElementById("chatSend").disabled = true;
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 60000);
+    const response = await fetch("/api/models/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message, attach_resume: document.getElementById("attachResume").checked}),
+      signal: controller.signal,
+      cache: "no-store"
+    });
+    window.clearTimeout(timer);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      document.getElementById("chatStatus").textContent = payload.detail || payload.error || "Ollama down";
+    } else {
+      input.value = "";
+      document.getElementById("chatStatus").textContent = payload.model || "ok";
+    }
+    renderChat(payload.messages || []);
+  } catch (err) {
+    document.getElementById("chatStatus").textContent = "timed out";
+  } finally {
+    document.getElementById("chatSend").disabled = false;
+  }
+};
+async function saveSnippet(target) {
+  if (!lastAssistant) {
+    document.getElementById("chatStatus").textContent = "no assistant reply yet";
+    return;
+  }
+  const result = await api("POST", "/api/models/chat/snippet", {text: lastAssistant, target});
+  document.getElementById("chatStatus").textContent = result.ok ? ("saved to " + target) : (result.error || "failed");
+}
+document.getElementById("saveSummaryBtn").onclick = () => saveSnippet("summary");
+document.getElementById("saveSeedBtn").onclick = () => saveSnippet("seed");
+window.onStatus = function(data) {
+  const ollama = data.ollama || {};
+  if (ollama.pulling) {
+    document.getElementById("pullStatus").textContent =
+      "pulling " + (ollama.pull_model || ollama.model || "") + (ollama.pull_progress ? " " + ollama.pull_progress : "");
+  }
+};
+loadSettings();
+setInterval(loadSettings, 8000);
+</script>
+{% endblock %}

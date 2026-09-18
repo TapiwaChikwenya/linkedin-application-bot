@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics · APPLY/OPS{% endblock %}
+{% block content %}
+  <section class="fail-hero" id="latestFailure">
+    <div class="muted">No failure screenshot yet.</div>
+  </section>
+  <p class="muted">Latest captured page dump stays local. Compact index only.</p>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Kind</th>
+          <th>Size</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+function formatSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+function renderFailure(item) {
+  const box = document.getElementById("latestFailure");
+  if (!item) {
+    box.innerHTML = `<div class="muted">No failure screenshot yet.</div><div><h2>Latest failure</h2><p class="muted">When Easy Apply dies, the reason and PNG land here — not a file dump.</p></div>`;
+    return;
+  }
+  const shot = item.screenshot
+    ? `<a href="/artifacts/${esc(item.screenshot)}" target="_blank" rel="noreferrer"><img class="shot" src="/artifacts/${esc(item.screenshot)}" alt="latest failure"></a>`
+    : `<div class="muted">No PNG</div>`;
+  box.innerHTML = `${shot}
+    <div>
+      <h2>Latest failure</h2>
+      <p>${pill(item.status)} ${esc(item.title || "(no title)")}</p>
+      <p class="muted">${esc(item.company || "")} · ${jid(item.job_id)}</p>
+      <p>${esc(item.reason || "failed")}</p>
+      <p>${item.html ? `<a href="/artifacts/${esc(item.html)}" target="_blank" rel="noreferrer">html</a>` : ""}</p>
+    </div>`;
+}
+async function loadArtifacts() {
+  const data = await fetch("/api/artifacts").then(r => r.json());
+  renderFailure(data.latest_failure);
+  const items = (data.artifacts || []).slice(0, 12);
+  document.getElementById("rows").innerHTML = items.map(item => `
+    <tr>
+      <td>${esc(item.name)}</td>
+      <td>${esc(item.kind)}</td>
+      <td class="muted">${formatSize(item.size)}</td>
+      <td><a href="/artifacts/${esc(item.name)}" target="_blank" rel="noreferrer">open</a></td>
+    </tr>
+  `).join("") || `<tr><td colspan="4" class="muted">No diagnostic files yet.</td></tr>`;
+}
+loadArtifacts();
+</script>
+{% endblock %}

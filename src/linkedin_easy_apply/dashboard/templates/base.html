@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}APPLY/OPS{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #030404;
+      --panel: #0a0c0a;
+      --tape: #070908;
+      --line: #1c2418;
+      --grid: rgba(62, 224, 255, .055);
+      --text: #e7ecdf;
+      --muted: #7c8470;
+      --go: #d6ff3c;
+      --cyan: #3ee0ff;
+      --stop: #ff4d42;
+      --ok: #b6ff4a;
+      --warn: #ffcc33;
+      --bad: #ff6b5a;
+      --ease: cubic-bezier(.2, .8, .2, 1);
+      --dur: 180ms;
+      --mono: "IBM Plex Mono", "Cascadia Mono", Consolas, "Segoe UI", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        linear-gradient(180deg, rgba(214,255,60,.035), transparent 22%),
+        repeating-linear-gradient(0deg, transparent 0 7px, var(--grid) 7px 8px),
+        repeating-linear-gradient(90deg, transparent 0 7px, var(--grid) 7px 8px),
+        var(--bg);
+      font: 12px/1.35 var(--mono);
+      font-variant-numeric: tabular-nums lining-nums;
+    }
+    body::after {
+      content: "";
+      pointer-events: none;
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      background: repeating-linear-gradient(
+        180deg,
+        rgba(255,255,255,.015) 0 1px,
+        transparent 1px 3px
+      );
+      mix-blend-mode: overlay;
+    }
+    a { color: var(--go); text-decoration: none; }
+    a:hover { color: var(--cyan); }
+    button, .btn { font: inherit; cursor: pointer; }
+    button:disabled, .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .top {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: #060806;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 8px 12px 6px;
+      flex-wrap: wrap;
+    }
+    .brand {
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: .2em;
+      margin: 0;
+      color: var(--go);
+    }
+    .keys-hint {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    kbd {
+      border: 1px solid var(--line);
+      padding: 0 5px;
+      color: var(--cyan);
+      font: inherit;
+    }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #startBtn {
+      background: var(--go);
+      color: #111;
+      border: 2px solid #f4ff99;
+      min-width: 148px;
+      padding: 10px 16px;
+      font-weight: 800;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    #stopBtn, #stopOllamaBtn, #loginBtn, .btn-ghost, button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--line);
+      padding: 9px 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    #stopBtn { border-color: #5a2420; color: var(--stop); }
+    .ticker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      padding: 0 12px 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .ticker b { color: var(--text); font-weight: 700; }
+    .contract {
+      margin: 0;
+      padding: 0 12px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .04em;
+    }
+    .cue {
+      margin: 0 0 8px;
+      padding: 7px 10px;
+      border: 1px solid #3a4a18;
+      background: #101408;
+    }
+    .cue[hidden] { display: none; }
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 6px;
+      background: var(--muted);
+      box-shadow: 0 0 0 0 transparent;
+      transition: background var(--dur) var(--ease), box-shadow 220ms var(--ease);
+      vertical-align: middle;
+    }
+    .dot.ok, .dot.run { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+    .dot.ignite { animation: lamp-on 240ms var(--ease); }
+    @keyframes lamp-on {
+      from { transform: scale(.55); opacity: .25; box-shadow: 0 0 0 0 var(--go); }
+      to { transform: scale(1); opacity: 1; box-shadow: 0 0 10px var(--go); }
+    }
+    nav {
+      display: flex;
+      gap: 16px;
+      padding: 2px 12px 0;
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      font-size: 11px;
+    }
+    nav a { color: var(--muted); padding-bottom: 7px; border-bottom: 2px solid transparent; }
+    nav a.active { color: var(--text); border-bottom-color: var(--go); }
+    body.is-running #startBtn {
+      background: #14150f;
+      color: var(--muted);
+      border-color: var(--line);
+      opacity: 1;
+    }
+    body.is-running #stopBtn {
+      background: var(--stop);
+      color: #140404;
+      border-color: #ff8a80;
+      font-weight: 800;
+    }
+    .err {
+      display: none;
+      padding: 7px 12px;
+      background: #3a1010;
+      color: #ffb4ac;
+      border-top: 1px solid #6a2420;
+    }
+    .err.show { display: block; }
+    .note {
+      display: none;
+      padding: 6px 12px;
+      background: #2a2610;
+      color: var(--warn);
+    }
+    .note.show { display: block; }
+    main { padding: 10px 12px 22px; max-width: none; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      text-align: left;
+      padding: 6px 7px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    td { overflow-wrap: anywhere; }
+    th {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      position: sticky;
+      top: 0;
+      background: #10140f;
+      z-index: 1;
+    }
+    .wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      max-height: calc(100vh - 260px);
+    }
+    input, select, textarea {
+      background: #070908;
+      color: var(--text);
+      border: 1px solid var(--line);
+      padding: 6px 8px;
+      font: inherit;
+      min-width: 0;
+    }
+    td input, td select { min-width: 12ch; width: 100%; max-width: 28ch; }
+    .muted { color: var(--muted); }
+    .error { color: var(--bad); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .cyan { color: var(--cyan); }
+    .jid {
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .04em;
+      color: var(--cyan);
+      font-size: 11px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 0 6px;
+      font-size: 10px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .pill.applied, .pill.approved, .pill.running, .pill.apply { color: var(--ok); border-color: #245a38; }
+    .pill.failed, .pill.page_timeout, .pill.rejected, .pill.crashed, .pill.bad, .pill.fail { color: var(--bad); border-color: #5a2420; }
+    .pill.skipped_filter, .pill.already_applied, .pill.pending, .pill.starting, .pill.warn, .pill.skip, .pill.skipped_fit, .pill.needs_review { color: var(--warn); border-color: #5a4a18; }
+    .pill.linkedin { color: var(--cyan); border-color: #1a4a55; }
+    .pill.seed { color: var(--go); border-color: #3a4a18; }
+    .pill.llm { color: var(--text); border-color: var(--line); }
+    .pill.kind-email, .pill.kind-tel, .pill.kind-text, .pill.kind-textarea, .pill.kind-date {
+      color: var(--cyan); border-color: #1a4a55;
+    }
+    .pill.kind-number { color: var(--go); border-color: #3a4a18; }
+    .pill.kind-yes_no, .pill.kind-select { color: var(--warn); border-color: #5a4a18; }
+    .pill.kind-file, .pill.kind-unknown { color: var(--muted); }
+    .log {
+      background: #050705;
+      border: 1px solid var(--line);
+      min-height: 42vh;
+      max-height: calc(100vh - 320px);
+      overflow: auto;
+      padding: 6px 8px;
+      font-size: 11px;
+    }
+    .log .evt {
+      display: grid;
+      grid-template-columns: 8ch 5ch 12ch minmax(0, 1fr);
+      gap: 8px;
+      padding: 2px 0;
+      border-bottom: 1px solid #121510;
+    }
+    .log .evt span:last-child { overflow-wrap: anywhere; }
+    .log .evt.lvl-error .lvl { color: var(--bad); }
+    .log .evt.lvl-warn .lvl, .log .evt.lvl-warning .lvl { color: var(--warn); }
+    .log .evt.lvl-info .lvl { color: var(--muted); }
+    .log .evt.dec-apply { box-shadow: inset 3px 0 0 var(--ok); padding-left: 6px; }
+    .log .evt.dec-skip { box-shadow: inset 3px 0 0 var(--warn); padding-left: 6px; color: var(--warn); }
+    .log .evt.dec-skip .lvl { color: var(--warn); }
+    .log .evt.dec-fail { box-shadow: inset 3px 0 0 var(--bad); padding-left: 6px; }
+    .log .evt-in { animation: row-in 220ms var(--ease); }
+    @keyframes row-in {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .log .empty { color: var(--muted); padding: 8px 0; }
+    .now, .cell, .fail-hero, .memory-panel {
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      background: var(--panel);
+    }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      margin-bottom: 8px;
+      border: 1px solid var(--line);
+    }
+    .board .cell { margin: 0; }
+    .k {
+      font-size: 10px;
+      letter-spacing: .16em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .v { font-size: 13px; margin-top: 3px; }
+    .now .muted, .log-head { letter-spacing: .12em; font-size: 10px; text-transform: uppercase; }
+    .log-head { display: flex; justify-content: space-between; margin: 8px 0 4px; color: var(--muted); }
+    #currentJob { margin: 4px 0 0; font-size: 13px; }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; min-width: 18ch; }
+    .row-actions button { padding: 6px 8px; text-transform: uppercase; letter-spacing: .04em; }
+    .approve { background: var(--go); color: #111; border: 0; font-weight: 700; }
+    .reject { background: transparent; color: var(--stop); border: 1px solid #5a2420; }
+    .skip { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    img.shot { max-width: 280px; max-height: 150px; border: 1px solid var(--line); display: block; }
+    .seed-btn {
+      background: var(--go);
+      color: #111;
+      border: 2px solid #f4ff99;
+      padding: 10px 14px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .memory-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(18rem, .9fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .memory-panel h2, .fail-hero h2 {
+      margin: 0 0 4px;
+      font-size: 11px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(22rem, .95fr);
+      gap: 8px;
+      align-items: start;
+    }
+    .settings-grid .memory-panel { margin-bottom: 8px; }
+    .chat-log {
+      background: #050705;
+      border: 1px solid var(--line);
+      min-height: 36vh;
+      max-height: calc(100vh - 280px);
+      overflow: auto;
+      padding: 8px;
+    }
+    .chat-msg { margin: 0 0 8px; }
+    .chat-msg .k { margin-bottom: 2px; }
+    .chat-msg.user { color: var(--cyan); }
+    .chat-msg.assistant { color: var(--text); }
+    @media (max-width: 980px) {
+      .settings-grid { grid-template-columns: 1fr; }
+    }
+    .memory-kpis { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; }
+    .memory-kpis b { color: var(--go); }
+    .seed-panel { border-color: #9aaa2a; box-shadow: inset 0 0 0 1px #3a4a18; }
+    .ticker a { color: var(--muted); }
+    .ticker a:hover { color: var(--go); text-decoration: none; }
+    .chip {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      padding: 5px 8px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-size: 11px;
+    }
+    .chip.active { color: var(--go); border-color: #5a6a18; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin: 0 0 10px;
+    }
+    .chart {
+      border: 1px solid var(--line);
+      background:
+        repeating-linear-gradient(90deg, rgba(62,224,255,.07) 0 1px, transparent 1px 20%),
+        repeating-linear-gradient(0deg, rgba(214,255,60,.05) 0 1px, transparent 1px 9px),
+        var(--tape);
+      padding: 8px;
+      cursor: crosshair;
+      min-height: 108px;
+    }
+    .chart .k { margin-bottom: 6px; }
+    .hbar {
+      display: grid;
+      grid-template-columns: 11ch minmax(0, 1fr) 9ch;
+      gap: 6px;
+      align-items: center;
+      margin: 3px 0;
+      font-size: 10px;
+    }
+    .track {
+      height: 7px;
+      background: #141812;
+      border: 1px solid #22281c;
+      position: relative;
+      overflow: hidden;
+    }
+    .fill {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 0;
+      transition: width 240ms var(--ease);
+    }
+    .fill.apply { left: 0; background: var(--ok); }
+    .fill.skip { background: var(--warn); }
+    .fill.fail { background: var(--bad); }
+    .fill.seen { background: #3a4034; }
+    .fail-hero {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 12px;
+      margin-bottom: 10px;
+      align-items: start;
+    }
+    tr.selected td { background: #12180e; }
+    .meter {
+      display: flex;
+      height: 6px;
+      background: #141812;
+      margin-top: 6px;
+      border: 1px solid #22281c;
+      overflow: hidden;
+    }
+    .meter span {
+      height: 100%;
+      width: 0;
+      background: var(--ok);
+      transition: width 240ms var(--ease);
+    }
+    @media (max-width: 980px) {
+      .board, .metrics, .memory-hero, .fail-hero { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 800px) {
+      .board, .metrics, .memory-hero, .fail-hero { grid-template-columns: 1fr; }
+      .keys-hint { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand-row">
+      <h1 class="brand">APPLY/OPS</h1>
+      <div class="controls">
+        <button id="startBtn" type="button" title="{{ start_contract }}">Start run</button>
+        <button id="stopBtn" type="button">Stop</button>
+        <button id="loginBtn" type="button">Login</button>
+        <button id="stopOllamaBtn" type="button">Stop Ollama</button>
+      </div>
+      <div class="keys-hint"><kbd>S</kbd> start · <kbd>X</kbd> stop</div>
+    </div>
+    <p class="contract" id="startContract">{{ start_contract }}</p>
+    <div class="ticker" id="ticker">
+      <span><span class="dot" id="workerDot"></span>WORKER <b id="workerState">—</b></span>
+      <span><span class="dot" id="llmDot"></span>LLM <b id="llmState">—</b></span>
+      <span><span class="dot" id="ollamaDot"></span>OLLAMA <b id="ollamaState">—</b></span>
+      <span>TOK <b id="tokenState">—</b></span>
+      <span>PACE <b id="paceState">—</b></span>
+      <span>SEARCH <b id="searchState">—</b></span>
+      <span>FIT <b id="fitState">—</b></span>
+      <span>TODAY <b id="appliedToday">0</b></span>
+      <span>RUN <b id="runQuota">0</b></span>
+      <span>CAPS <b id="remaining">0</b> left</span>
+      <span>SCHED <b id="schedState">manual</b></span>
+      <a href="/questions" id="pendingCue">PENDING Q <b id="pendingQuestions">0</b></a>
+    </div>
+    <nav>
+      <a href="/" class="{% if nav == '/' %}active{% endif %}">Live</a>
+      <a href="/applications" class="{% if nav.startswith('/applications') %}active{% endif %}">Applications</a>
+      <a href="/questions" class="{% if nav.startswith('/questions') %}active{% endif %}">Questions</a>
+      <a href="/models" class="{% if nav.startswith('/models') or nav.startswith('/settings') %}active{% endif %}">Settings</a>
+      <a href="/diagnostics" class="{% if nav.startswith('/diagnostics') %}active{% endif %}">Diagnostics</a>
+    </nav>
+    <div class="err" id="errorBar"></div>
+    <div class="note" id="noteBar"></div>
+  </div>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    function reduceMotion() {
+      return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+    function pill(status) {
+      return `<span class="pill ${esc(status || "")}">${esc(status || "unknown")}</span>`;
+    }
+    function jid(value) {
+      const id = String(value || "");
+      return id ? `<span class="jid">${esc(id)}</span>` : "";
+    }
+    function fmtFit(value) {
+      if (value === null || value === undefined || value === "") return "—";
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(2) : "—";
+    }
+    function typingTarget(el) {
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+    }
+    function countUp(el, next, suffix) {
+      if (!el) return;
+      const to = Number(next) || 0;
+      const from = Number(el.dataset.n || 0);
+      const extra = suffix || "";
+      el.dataset.n = String(to);
+      if (reduceMotion() || from === to) {
+        el.textContent = String(to) + extra;
+        return;
+      }
+      const t0 = performance.now();
+      function frame(now) {
+        const p = Math.min(1, (now - t0) / 220);
+        el.textContent = String(Math.round(from + (to - from) * p)) + extra;
+        if (p < 1) requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+    function decisionClass(status, message) {
+      const blob = (String(status || "") + " " + String(message || "")).toLowerCase();
+      if (/skipped before open|skipped_fit|needs_review|\bskip(?:ped|ping)?\b|already applied|title missing/.test(blob)) {
+        return "dec-skip";
+      }
+      if (/job fit llama=\s*[\d.]+\s*apply|\bjust applied\b/.test(blob)) return "dec-apply";
+      if (/\bapplied\b|\bapply\b/.test(blob) && !/\bskip/.test(blob)) return "dec-apply";
+      if (/\bfail|couldn't|couldnt/.test(blob)) return "dec-fail";
+      return "";
+    }
+    function chartRow(item) {
+      const applied = Number(item && item.applied) || 0;
+      const skipped = Number(item && item.skipped) || 0;
+      const failed = Number(item && item.failed) || 0;
+      const seen = Number(item && item.seen) || 0;
+      const total = Number((item && (item.total || item.count))) || (applied + skipped + failed + seen);
+      return {
+        label: String((item && (item.label || item.key)) || "other"),
+        applied, skipped, failed, seen, total
+      };
+    }
+    function windowRows(data, alias, dim) {
+      if (Array.isArray(data[alias]) && data[alias].length) return data[alias].map(chartRow);
+      const week = data.last_7_days || {};
+      const today = data.today || {};
+      const raw = (Array.isArray(week[dim]) && week[dim].length) ? week[dim] : (today[dim] || []);
+      return (raw || []).map(chartRow);
+    }
+    function vsFrom(data, which) {
+      if (which === "today" && data.applied_vs_skipped) {
+        const vs = data.applied_vs_skipped;
+        if (Number(vs.applied) || Number(vs.skipped) || Number(vs.failed)) {
+          return {
+            applied: Number(vs.applied) || 0,
+            skipped: Number(vs.skipped) || 0,
+            failed: Number(vs.failed) || 0,
+            seen: Number(vs.seen) || 0
+          };
+        }
+      }
+      const win = data[which] && typeof data[which] === "object" ? data[which] : {};
+      const totals = win.totals || {};
+      const vs = {
+        applied: Number(totals.applied) || 0,
+        skipped: Number(totals.skipped) || 0,
+        failed: Number(totals.failed) || 0,
+        seen: Number(totals.seen) || 0
+      };
+      if (vs.applied || vs.skipped || vs.failed || vs.seen) return vs;
+      (win.by_outcome || []).forEach(row => {
+        const key = String(row.key || "");
+        if (key in vs) vs[key] = Number(row.count) || 0;
+      });
+      return vs;
+    }
+    function fillHtml(kind, value, left) {
+      return `<span class="fill ${kind}" data-w="${value}" data-l="${left}" style="left:${left}%"></span>`;
+    }
+    function vsBar(label, vs) {
+      const applied = Number(vs.applied) || 0;
+      const skipped = Number(vs.skipped) || 0;
+      const failed = Number(vs.failed) || 0;
+      const seen = Number(vs.seen) || 0;
+      const max = Math.max(1, applied + skipped + failed + seen);
+      const a = (applied / max) * 100;
+      const s = (skipped / max) * 100;
+      const f = (failed / max) * 100;
+      const n = (seen / max) * 100;
+      return `<div class="hbar">
+        <span>${esc(label)}</span>
+        <div class="track">
+          ${fillHtml("apply", a, 0)}
+          ${fillHtml("skip", s, a)}
+          ${fillHtml("fail", f, a + s)}
+          ${fillHtml("seen", n, a + s + f)}
+        </div>
+        <span class="muted">${applied}A ${skipped}S ${failed}F</span>
+      </div>`;
+    }
+    function animateFills(root) {
+      if (!root) return;
+      const fills = root.querySelectorAll(".fill[data-w]");
+      const motionOff = reduceMotion();
+      fills.forEach(fill => {
+        fill.style.left = (fill.dataset.l || "0") + "%";
+        fill.style.width = motionOff ? ((fill.dataset.w || "0") + "%") : "0%";
+      });
+      if (motionOff) return;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          fills.forEach(fill => { fill.style.width = (fill.dataset.w || "0") + "%"; });
+        });
+      });
+    }
+    function renderBars(el, rows, kind) {
+      if (!el) return;
+      const items = rows || [];
+      if (!items.length) {
+        el.innerHTML = `<div class="k">${esc(kind)}</div><div class="muted">no samples</div>`;
+        return;
+      }
+      const max = Math.max(1, ...items.map(item => Number(item.total) || 0));
+      el.innerHTML = `<div class="k">${esc(kind)}</div>` + items.map(item => {
+        const applied = Number(item.applied) || 0;
+        const skipped = Number(item.skipped) || 0;
+        const failed = Number(item.failed) || 0;
+        const a = (applied / max) * 100;
+        const s = (skipped / max) * 100;
+        const f = (failed / max) * 100;
+        return `<div class="hbar">
+          <span>${esc(item.label || "other")}</span>
+          <div class="track">
+            ${fillHtml("apply", a, 0)}
+            ${fillHtml("skip", s, a)}
+            ${fillHtml("fail", f, a + s)}
+          </div>
+          <span class="muted">${applied}A ${skipped}S</span>
+        </div>`;
+      }).join("");
+      animateFills(el);
+    }
+    function renderVs(el, todayVs, weekVs) {
+      if (!el) return;
+      el.innerHTML = `<div class="k">OUTCOME</div>${vsBar("today", todayVs || {})}${vsBar("7d", weekVs || {})}`;
+      animateFills(el);
+    }
+    const metricsSig = new WeakMap();
+    function renderMetrics(root, metrics) {
+      if (!root) return;
+      const data = metrics || {};
+      const sig = JSON.stringify({
+        vs: data.applied_vs_skipped || {},
+        sectors: data.sectors || (data.last_7_days && data.last_7_days.by_sector) || [],
+        markets: data.markets || (data.last_7_days && data.last_7_days.by_market) || [],
+        locations: data.locations || (data.last_7_days && data.last_7_days.by_location) || [],
+        today: data.today && data.today.totals,
+        week: data.last_7_days && data.last_7_days.totals
+      });
+      if (metricsSig.get(root) === sig) return;
+      metricsSig.set(root, sig);
+      renderVs(root.querySelector("[data-chart=vs]"), vsFrom(data, "today"), vsFrom(data, "last_7_days"));
+      renderBars(root.querySelector("[data-chart=sectors]"), windowRows(data, "sectors", "by_sector"), "SECTOR 7D");
+      renderBars(root.querySelector("[data-chart=markets]"), windowRows(data, "markets", "by_market"), "MARKET 7D");
+      renderBars(root.querySelector("[data-chart=locations]"), windowRows(data, "locations", "by_location"), "LOCATION 7D");
+    }
+    async function loadMetrics(root) {
+      if (!root) return;
+      try {
+        const response = await fetch("/api/metrics");
+        if (!response.ok) {
+          renderMetrics(root, {});
+          return;
+        }
+        const data = await response.json();
+        renderMetrics(root, data && typeof data === "object" ? data : {});
+      } catch (err) {
+        try { renderMetrics(root, {}); } catch (ignored) {}
+      }
+    }
+    async function fetchWithTimeout(url, options, ms) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), ms);
+      try {
+        return await fetch(url, Object.assign({}, options || {}, {signal: controller.signal, cache: "no-store"}));
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+    async function api(method, url, body) {
+      const options = {method, headers: {}};
+      if (body !== undefined) {
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(body);
+      }
+      let response;
+      try {
+        response = await fetchWithTimeout(url, options, 8000);
+      } catch (err) {
+        const timedOut = err && err.name === "AbortError";
+        return {ok: false, error: timedOut ? "Request timed out." : String(err || "Request failed")};
+      }
+      let payload = {};
+      try { payload = await response.json(); } catch (err) { payload = {}; }
+      payload._http = response.status;
+      payload.ok = payload.ok !== false && response.ok;
+      if (!response.ok && !payload.error) {
+        const detail = payload.detail;
+        if (typeof detail === "string") payload.error = detail;
+        else if (detail) payload.error = JSON.stringify(detail);
+        else payload.error = "HTTP " + response.status;
+      }
+      return payload;
+    }
+    function showError(text) {
+      const bar = document.getElementById("errorBar");
+      bar.textContent = text || "";
+      bar.classList.toggle("show", Boolean(text));
+    }
+    function showNote(text) {
+      const bar = document.getElementById("noteBar");
+      bar.textContent = text || "";
+      bar.classList.toggle("show", Boolean(text));
+    }
+    function setDot(id, kind) {
+      const el = document.getElementById(id);
+      const ignite = el.classList.contains("ignite") ? " ignite" : "";
+      el.className = "dot " + (kind || "") + ignite;
+    }
+    function igniteStartSequence() {
+      document.body.classList.add("is-igniting");
+      const ollama = document.getElementById("ollamaDot");
+      const worker = document.getElementById("workerDot");
+      ollama.classList.add("ignite");
+      setDot("ollamaDot", "warn");
+      window.setTimeout(() => {
+        worker.classList.add("ignite");
+        setDot("workerDot", "warn");
+      }, reduceMotion() ? 0 : 180);
+    }
+    let starting = false;
+    let statusBusy = false;
+    let questionMutation = 0;
+    async function refreshHeader() {
+      if (statusBusy) return;
+      statusBusy = true;
+      let data;
+      try {
+        const response = await fetchWithTimeout("/api/status", {}, 4000);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        data = await response.json();
+      } catch (err) {
+        statusBusy = false;
+        return null;
+      }
+      try {
+      const worker = data.worker || {};
+      const llm = data.llm || {};
+      const ollama = data.ollama || {};
+      const quota = data.quota || {};
+      const questions = data.questions || {};
+      const search = data.search || {};
+      const alive = Boolean(worker.alive);
+      const phase = worker.phase || (alive ? "running" : (worker.run && worker.run.status) || "stopped");
+      const workerState = document.getElementById("workerState");
+      workerState.textContent = alive
+        ? (phase + (worker.pid ? " · pid " + worker.pid : ""))
+        : phase;
+      workerState.className = alive ? "ok" : (phase === "crashed" ? "error" : "");
+      setDot("workerDot", alive ? (phase === "starting" ? "warn" : "run") : (phase === "crashed" ? "bad" : ""));
+      const llmReady = Boolean(data.llm_ready || llm.ready);
+      document.getElementById("llmState").textContent = llmReady
+        ? ((llm.model || "llama3.2") + " ready")
+        : (llm.detail || "not ready");
+      setDot("llmDot", llmReady ? "ok" : (ollama.pulling ? "warn" : "bad"));
+      const ollamaLabel = ollama.pulling
+        ? ("pulling " + (ollama.pull_model || ollama.model || llm.model || "model") + (ollama.pull_progress ? " " + ollama.pull_progress : ""))
+        : (ollama.started || ollama.ok
+          ? (ollama.detail || "up")
+          : (ollama.detail || llm.detail || "off"));
+      document.getElementById("ollamaState").textContent = ollamaLabel;
+      setDot("ollamaDot", ollama.pulling ? "warn" : (ollama.ok || llmReady ? "ok" : "bad"));
+      const tokens = ollama.tokens || llm.tokens || llm.context_length;
+      document.getElementById("tokenState").textContent = tokens ? (tokens + " ctx") : (llmReady ? "ready" : "—");
+      document.getElementById("paceState").textContent = data.pace || "human";
+      document.getElementById("searchState").textContent = search.keyword
+        ? (search.keyword + (search.location ? " · " + search.location : ""))
+        : "—";
+      const fit = data.last_fit || {};
+      const fitEl = document.getElementById("fitState");
+      if (fitEl) {
+        if (fit.score != null || fit.decision || fit.line) {
+          const score = fit.score != null && Number.isFinite(Number(fit.score))
+            ? Number(fit.score).toFixed(2)
+            : "—";
+          fitEl.textContent = score + (fit.decision ? " " + fit.decision : "");
+          fitEl.className = fit.decision === "skip" ? "warn" : (fit.decision === "apply" ? "ok" : "");
+          fitEl.title = fit.line || "";
+        } else {
+          fitEl.textContent = "—";
+          fitEl.className = "";
+          fitEl.title = "";
+        }
+      }
+      const dayCap = quota.day_cap ?? "";
+      const runCap = quota.run_cap ?? "";
+      countUp(document.getElementById("appliedToday"), quota.applied_today ?? 0, dayCap !== "" ? "/" + dayCap : "");
+      document.getElementById("runQuota").textContent = (quota.applied_this_run ?? 0) + (runCap !== "" ? "/" + runCap : "");
+      const capsLeft = quota.remaining ?? 0;
+      document.getElementById("remaining").textContent =
+        capsLeft + (runCap !== "" ? (" · run " + (quota.run_remaining ?? capsLeft) + "/" + runCap + " · day " + (quota.day_remaining ?? "") + "/" + dayCap) : "");
+      const schedule = data.schedule || {};
+      const schedEl = document.getElementById("schedState");
+      if (schedEl) {
+        schedEl.textContent = schedule.enabled
+          ? (schedule.active ? "open " + (schedule.now || "") : "outside")
+          : "manual";
+        schedEl.className = schedule.enabled && !schedule.active ? "warn" : "";
+      }
+      const outside = Boolean(schedule.enabled && !schedule.active);
+      countUp(document.getElementById("pendingQuestions"), questions.pending ?? 0, "");
+      const busy = starting || alive || phase === "starting";
+      document.body.classList.toggle("is-running", Boolean(alive || phase === "starting"));
+      if (alive && !ollama.pulling) {
+        document.getElementById("ollamaDot").classList.remove("ignite");
+        document.getElementById("workerDot").classList.remove("ignite");
+        document.body.classList.remove("is-igniting");
+      }
+      const startBtn = document.getElementById("startBtn");
+      startBtn.disabled = busy || (data.profile_locked && !alive) || (outside && !alive);
+      startBtn.textContent = (alive || phase === "starting")
+        ? "Running"
+        : (outside ? "Outside schedule" : "Start run");
+      document.getElementById("stopBtn").disabled = !alive && phase !== "starting";
+      document.getElementById("loginBtn").disabled = busy;
+      if (!starting && !questionMutation) {
+        showError(data.last_error || (!alive && data.profile_locked ? "Firefox profile is locked. Close other Firefox windows that use this bot profile, then Start again." : ""));
+      }
+      try {
+        if (window.onStatus) window.onStatus(data);
+      } catch (err) {}
+      return data;
+      } catch (err) {
+        return null;
+      } finally {
+        statusBusy = false;
+      }
+    }
+    document.getElementById("startBtn").onclick = async () => {
+      starting = true;
+      document.getElementById("startBtn").disabled = true;
+      document.getElementById("loginBtn").disabled = true;
+      igniteStartSequence();
+      showNote("Starting Ollama, then the Easy Apply worker…");
+      showError("");
+      try {
+        const result = await api("POST", "/api/run/start");
+        if (!result.ok) {
+          showError(result.error || result.warning || "Start failed.");
+          showNote(result.warning && result.error ? result.warning : "");
+        } else {
+          const ollama = result.ollama || {};
+          if (ollama.pulling) showNote("Worker running. " + (ollama.detail || "pulling model"));
+          else if (result.warning) showNote(result.warning);
+          else showNote("");
+        }
+      } catch (err) {
+        showError(String(err));
+      } finally {
+        starting = false;
+        await refreshHeader();
+      }
+    };
+    document.getElementById("loginBtn").onclick = async () => {
+      document.getElementById("loginBtn").disabled = true;
+      showNote("Opening Firefox at LinkedIn login…");
+      showError("");
+      try {
+        const result = await api("POST", "/api/login");
+        if (!result.ok) {
+          showError(result.error || "Login failed.");
+          showNote("");
+        } else {
+          showNote(result.message || "Firefox opened at LinkedIn login. Sign in, confirm the feed loads, then close that window before Start run.");
+        }
+      } catch (err) {
+        showError(String(err));
+        showNote("");
+      } finally {
+        await refreshHeader();
+      }
+    };
+    document.getElementById("stopBtn").onclick = async () => {
+      const result = await api("POST", "/api/run/stop");
+      if (!result.ok) showError(result.error || "Stop failed.");
+      await refreshHeader();
+    };
+    document.getElementById("stopOllamaBtn").onclick = async () => {
+      const result = await api("POST", "/api/ollama/stop");
+      showNote(result.error || result.message || (result.ok ? "Ollama stop requested." : ""));
+      await refreshHeader();
+    };
+    document.addEventListener("keydown", (event) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (typingTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (key === "s") {
+        event.preventDefault();
+        const btn = document.getElementById("startBtn");
+        if (btn && !btn.disabled) btn.click();
+      } else if (key === "x") {
+        event.preventDefault();
+        const btn = document.getElementById("stopBtn");
+        if (btn && !btn.disabled) btn.click();
+      }
+    });
+    refreshHeader();
+    setInterval(refreshHeader, 2000);
+    (function pollMetrics() {
+      const root = document.getElementById("metricsStrip");
+      if (!root) return;
+      loadMetrics(root);
+      setInterval(() => loadMetrics(root), 4000);
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

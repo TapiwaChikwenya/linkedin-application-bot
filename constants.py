@@ -8,7 +8,8 @@ fast = 2
 medium = 3
 slow = 20
 
-# Random page delay is now 1-2 seconds instead of 1-20 seconds.
-botSpeed = fast
+# Legacy upper bound used only when LINKEDIN_PACE=fast.
+# Human pacing lives in linkedin_easy_apply.pacing and is the default.
+botSpeed = slow
 
 # TO DO ADD OTHER PRINT CONSTANTS

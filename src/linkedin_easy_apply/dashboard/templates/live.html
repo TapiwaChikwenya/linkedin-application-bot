@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Live · APPLY/OPS{% endblock %}
+{% block content %}
+  <div class="board" id="tape">
+    <div class="cell">
+      <div class="k">01 SEARCH</div>
+      <div class="v" id="searchNow">—</div>
+      <div class="muted" id="searchPlan"></div>
+    </div>
+    <div class="cell">
+      <div class="k">02 LAST</div>
+      <div class="v" id="lastDecision">—</div>
+      <div class="muted" id="lastFit"></div>
+    </div>
+    <div class="cell">
+      <div class="k">03 QUOTA</div>
+      <div class="v" id="quotaNow">—</div>
+      <div class="meter" id="quotaMeter"><span id="quotaFill"></span></div>
+    </div>
+    <div class="cell">
+      <div class="k">04 LLM</div>
+      <div class="v" id="llmNow">—</div>
+      <div class="muted" id="tokenNow"></div>
+    </div>
+  </div>
+  <div class="metrics" id="metricsStrip">
+    <div class="chart" data-chart="vs"></div>
+    <div class="chart" data-chart="sectors"></div>
+    <div class="chart" data-chart="markets"></div>
+    <div class="chart" data-chart="locations"></div>
+  </div>
+  <p class="cue" id="questionCue" hidden></p>
+  <div class="now">
+    <div class="muted">CURRENT JOB</div>
+    <p id="currentJob">No active job.</p>
+  </div>
+  <div class="log-head"><span>EVENT STREAM</span><span id="logMeta">level · time · job id</span></div>
+  <div class="log" id="events"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+let seenEvents = new Set();
+window.onStatus = function(data) {
+  const job = data.current_job;
+  const last = data.last_job || job;
+  const fit = data.last_fit || {};
+  const search = data.search || {};
+  const quota = data.quota || {};
+  const llm = data.llm || {};
+  const ollama = data.ollama || {};
+  const alive = data.worker && data.worker.alive;
+  const pending = Number((data.questions && data.questions.pending) || 0);
+  const cue = document.getElementById("questionCue");
+  if (cue) {
+    cue.hidden = false;
+    if (pending > 0) {
+      cue.innerHTML = `<a href="/questions">${pending} question${pending === 1 ? "" : "s"} need answers</a>`;
+    } else {
+      cue.innerHTML = `<a href="/questions#seeds">Generate seed questions</a> to grow RAG memory. Seeds stay pending until you approve them.`;
+    }
+  }
+  document.getElementById("searchNow").textContent = search.keyword
+    ? (search.keyword + " · " + (search.location || "—"))
+    : "idle";
+  document.getElementById("searchPlan").textContent = (search.keywords || []).slice(0, 3).join(" / ");
+  const decision = (fit && fit.decision) || (last && last.decision) || "";
+  if (fit.line || fit.decision || last) {
+    document.getElementById("lastDecision").innerHTML =
+      `${pill(decision || (last && last.status) || "fit")} ${esc((last && last.title) || fit.line || "last fit")}`;
+    const score = fit.score != null ? fit.score : (last && last.fit_score);
+    document.getElementById("lastFit").innerHTML = fit.line
+      ? esc(fit.line)
+      : `FIT ${esc(fmtFit(score))} · ${last ? jid(last.job_id) : ""} ${esc((last && last.company) || "")}`;
+  } else {
+    document.getElementById("lastDecision").textContent = "no book";
+    document.getElementById("lastFit").textContent = "";
+  }
+  const dayCap = Number(quota.day_cap) || 0;
+  const appliedToday = Number(quota.applied_today) || 0;
+  document.getElementById("quotaNow").textContent =
+    appliedToday + "/" + (dayCap || "—") + " today · run " + (quota.applied_this_run ?? 0) + "/" + (quota.run_cap ?? "—");
+  const fill = document.getElementById("quotaFill");
+  fill.style.width = dayCap ? Math.min(100, (appliedToday / dayCap) * 100) + "%" : "0%";
+  const tokens = ollama.tokens || llm.tokens || llm.context_length;
+  const llmReady = Boolean(data.llm_ready || llm.ready);
+  document.getElementById("llmNow").textContent = llmReady ? ((llm.model || ollama.model || "llama3.2") + " ready") : (llm.detail || ollama.detail || "not ready");
+  document.getElementById("tokenNow").textContent = tokens ? (tokens + " tok") : (ollama.pulling ? "pulling" : "—");
+  const box = document.getElementById("currentJob");
+  if (job) {
+    box.innerHTML = `${pill(job.status)} ${esc(job.title || "(no title)")} · ${esc(job.company || "")} · ${jid(job.job_id)} ${job.url ? `<a href="${esc(job.url)}" target="_blank" rel="noreferrer">open</a>` : ""}`;
+  } else if (data.last_error) {
+    box.textContent = data.last_error;
+  } else if (!alive && data.profile_locked) {
+    box.textContent = "Firefox profile is locked. Close other Firefox windows that use this bot profile, then Start again.";
+  } else {
+    box.textContent = "No active job.";
+  }
+  const events = (data.events || []).slice().reverse();
+  const log = document.getElementById("events");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  const ids = events.map(event => event.event_id);
+  log.innerHTML = events.map(event => {
+    const fresh = !seenEvents.has(event.event_id) && seenEvents.size > 0;
+    const level = String(event.level || "info").toLowerCase();
+    const dec = decisionClass(event.level, event.message);
+    return `<div class="evt lvl-${esc(level)} ${dec}${fresh ? " evt-in" : ""}"><span class="muted">${esc(fmtTs(event.created_at))}</span><span class="lvl">${esc(level)}</span>${jid(event.job_id) || "<span></span>"}<span>${esc(event.message || "")}</span></div>`;
+  }).join("") || `<div class="empty">No events yet.</div>`;
+  seenEvents = new Set(ids.filter(id => id != null));
+  document.getElementById("logMeta").textContent = events.length + " rows";
+  if (atBottom) log.scrollTop = log.scrollHeight;
+};
+function fmtTs(value) {
+  const raw = String(value || "");
+  const d = new Date(raw);
+  if (!raw || Number.isNaN(d.getTime())) return raw.slice(11, 19) || raw;
+  return d.toLocaleTimeString([], {hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit"});
+}
+</script>
+{% endblock %}

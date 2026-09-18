@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Applications · APPLY/OPS{% endblock %}
+{% block content %}
+  <div class="metrics" id="metricsStrip">
+    <div class="chart" data-chart="vs"></div>
+    <div class="chart" data-chart="sectors"></div>
+    <div class="chart" data-chart="markets"></div>
+    <div class="chart" data-chart="locations"></div>
+  </div>
+  <form class="toolbar" onsubmit="return false;">
+    <input id="query" type="search" placeholder="title, company, job id">
+    <button class="chip active" type="button" data-status="">all</button>
+    <button class="chip" type="button" data-status="applied">applied</button>
+    <button class="chip" type="button" data-status="skipped">skipped</button>
+    <button class="chip" type="button" data-status="failed">failed</button>
+    <span class="muted" id="groupCounts"></span>
+  </form>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Status</th>
+          <th>Fit</th>
+          <th>Title</th>
+          <th>Company</th>
+          <th>Location</th>
+          <th>Reason</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+let currentStatus = "";
+async function loadJobs() {
+  const params = new URLSearchParams({
+    q: document.getElementById("query").value,
+    status: currentStatus
+  });
+  const data = await fetch("/api/jobs?" + params.toString()).then(r => r.json());
+  const groups = data.groups || {};
+  document.getElementById("groupCounts").textContent =
+    (groups.applied || 0) + " applied · " + (groups.skipped || 0) + " skipped · " + (groups.failed || 0) + " failed";
+  document.getElementById("rows").innerHTML = (data.jobs || []).map(job => `
+    <tr>
+      <td class="muted">${esc((job.seen_at || "").replace("T", " ").slice(0, 19))}</td>
+      <td>${pill(job.status)}</td>
+      <td class="${job.status === 'applied' || job.decision === 'apply' ? 'ok' : (job.status === 'skipped_fit' || job.decision === 'skip' || job.status === 'skipped_filter' || job.status === 'needs_review' ? 'warn' : '')}">${esc(fmtFit(job.fit_score))}</td>
+      <td>${esc(job.title || "")}</td>
+      <td>${esc(job.company || "")}</td>
+      <td class="muted">${esc(job.location || "")}</td>
+      <td class="muted">${esc(job.reason || "")}</td>
+      <td>
+        ${jid(job.job_id)}
+        ${job.url ? ` · <a href="${esc(job.url)}" target="_blank" rel="noreferrer">job</a>` : ""}
+        ${job.screenshot ? ` · <a href="/artifacts/${esc(job.screenshot)}">shot</a>` : ""}
+      </td>
+    </tr>
+  `).join("") || `<tr><td colspan="8" class="muted">No applications recorded yet.</td></tr>`;
+}
+document.querySelectorAll(".chip[data-status]").forEach(chip => {
+  chip.addEventListener("click", () => {
+    currentStatus = chip.getAttribute("data-status") || "";
+    document.querySelectorAll(".chip[data-status]").forEach(item => item.classList.toggle("active", item === chip));
+    loadJobs();
+  });
+});
+document.getElementById("query").addEventListener("input", loadJobs);
+loadJobs();
+</script>
+{% endblock %}
