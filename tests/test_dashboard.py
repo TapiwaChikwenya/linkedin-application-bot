@@ -70,6 +70,7 @@ def test_dashboard_home_renders(tmp_path):
     assert "APPLY/OPS" in response.text
     assert "Start run" in response.text
     assert "href=\"/questions\"" in response.text
+    assert "href=\"/models\"" in response.text
     assert "Start run = Ollama + worker" in response.text
     assert 'id="loginBtn"' in response.text
     assert "CAPS" in response.text
@@ -1142,4 +1143,177 @@ def test_start_combines_venv_and_ollama_errors(tmp_path, monkeypatch):
     assert worker.last_error == error
     live = client.get("/")
     assert "errorBar" in live.text
+
+
+def test_settings_page_and_caps_persist(tmp_path):
+    client, store = _client(tmp_path)
+    page = client.get("/models")
+    assert page.status_code == 200
+    assert "APPLY/OPS" in page.text
+    saved = client.post(
+        "/api/settings",
+        json={"max_applications_per_day": 7, "max_applications_per_run": 3},
+    )
+    assert saved.status_code == 200
+    assert store.get_setting("max_applications_per_day") == "7"
+    assert saved.json()["quota"]["max_per_day"] == 7
+    status = client.get("/api/status").json()
+    assert status["quota"]["day_cap"] == 7
+    assert status["quota"]["run_cap"] == 3
+    assert "schedule" in status
+    assert status["schedule"]["enabled"] is False
+
+
+def test_active_model_persists_in_settings_store(tmp_path):
+    client, store = _client(tmp_path)
+    response = client.post("/api/models/active", json={"model": "llama3.1"})
+    assert response.status_code == 200
+    assert store.get_setting("ollama_model") == "llama3.1"
+    assert response.json()["active"] == "llama3.1"
+
+
+def test_pull_model_is_background_and_mocked(tmp_path):
+    client, _store, _worker, ollama = _harness(tmp_path)
+    response = client.post("/api/models/pull", json={"model": "llama3.2-vision"})
+    assert response.status_code == 200
+    assert response.json()["pulling"] is True
+    assert ollama.pull_calls == ["llama3.2-vision"]
+
+
+def test_models_list_and_chat_mocked(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "linkedin_easy_apply.dashboard.operator.list_remote_models",
+        lambda host=None, timeout=2.0: {
+            "ok": True,
+            "host": "http://127.0.0.1:11434",
+            "models": ["llama3.2:latest"],
+        },
+    )
+    monkeypatch.setattr(
+        "linkedin_easy_apply.dashboard.operator.chat_complete",
+        lambda messages, **kwargs: {
+            "ok": True,
+            "model": "llama3.2",
+            "message": "Yes",
+            "role": "assistant",
+        },
+    )
+    client, store = _client(tmp_path)
+    listed = client.get("/api/models")
+    assert listed.status_code == 200
+    assert "llama3.2:latest" in listed.json()["models"]
+    chat = client.post("/api/models/chat", json={"message": "Authorized to work?"})
+    assert chat.status_code == 200
+    payload = chat.json()
+    assert payload["ok"] is True
+    assert payload["message"]["content"] == "Yes"
+    history = client.get("/api/models/chat").json()["messages"]
+    assert [row["role"] for row in history] == ["user", "assistant"]
+    assert store.list_chat_messages()[-1]["content"] == "Yes"
+
+
+def test_models_list_and_chat_return_503_when_ollama_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "linkedin_easy_apply.dashboard.operator.list_remote_models",
+        lambda host=None, timeout=2.0: {
+            "ok": False,
+            "host": "http://127.0.0.1:11434",
+            "models": [],
+            "error": "Ollama not reachable: URLError",
+        },
+    )
+    monkeypatch.setattr(
+        "linkedin_easy_apply.dashboard.operator.chat_complete",
+        lambda messages, **kwargs: {
+            "ok": False,
+            "error": "Ollama not reachable: TimeoutError",
+            "model": "llama3.2",
+        },
+    )
+    client, _store = _client(tmp_path)
+    assert client.get("/api/models").status_code == 503
+    chat = client.post("/api/models/chat", json={"message": "hello"})
+    assert chat.status_code == 503
+
+
+def test_resume_upload_activate_and_reject_non_pdf(tmp_path):
+    client, store = _client(tmp_path)
+    pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n"
+    uploaded = client.post(
+        "/api/resumes",
+        files={"file": ("Tapiwa_Resume.pdf", pdf, "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["name"] == "Tapiwa_Resume.pdf"
+    active = store.get_setting("resume_path")
+    assert active.endswith("Tapiwa_Resume.pdf")
+    assert (tmp_path / "resumes" / "Tapiwa_Resume.pdf").is_file()
+    listed = client.get("/api/resumes").json()["resumes"]
+    assert listed[0]["active"] is True
+    rejected = client.post(
+        "/api/resumes",
+        files={"file": ("notes.txt", b"not a pdf", "text/plain")},
+    )
+    assert rejected.status_code == 400
+    other = client.post(
+        "/api/resumes",
+        files={"file": ("other.pdf", pdf, "application/pdf")},
+    )
+    assert other.status_code == 200
+    client.post("/api/resumes/active", json={"name": "Tapiwa_Resume.pdf"})
+    deleted = client.delete("/api/resumes/other.pdf")
+    assert deleted.status_code == 200
+    names = [item["name"] for item in client.get("/api/resumes").json()["resumes"]]
+    assert names == ["Tapiwa_Resume.pdf"]
+
+
+def test_cannot_delete_resume_used_by_running_apply(tmp_path):
+    client, store, worker, _ollama = _harness(tmp_path)
+    pdf = b"%PDF-1.4\ntrailer\n%%EOF\n"
+    client.post("/api/resumes", files={"file": ("live.pdf", pdf, "application/pdf")})
+    worker.status = lambda: {
+        "alive": True,
+        "pid": 22,
+        "phase": "running",
+        "run": {"status": "running"},
+        "last_error": "",
+    }
+    response = client.delete("/api/resumes/live.pdf")
+    assert response.status_code == 409
+    assert (tmp_path / "resumes" / "live.pdf").is_file()
+
+
+def test_start_rejected_outside_schedule(tmp_path, monkeypatch):
+    import json
+    from datetime import datetime
+
+    import config
+
+    monkeypatch.setattr(config, "firefoxProfileRootDir", "")
+    monkeypatch.setattr("linkedin_easy_apply.dashboard.app.is_profile_locked", lambda _path: False)
+    client, store, _worker, ollama = _harness(tmp_path)
+    other_day = (datetime.now().weekday() + 1) % 7
+    store.set_setting(
+        "schedule_windows",
+        json.dumps([{"days": [other_day], "start": "09:00", "end": "17:00"}]),
+    )
+    response = client.post("/api/run/start")
+    assert response.status_code == 409
+    assert "Outside schedule" in response.json()["error"]
+    assert ollama.ensure_calls == 0
+
+
+def test_schedule_windows_persist(tmp_path):
+    client, store = _client(tmp_path)
+    saved = client.post(
+        "/api/settings",
+        json={"schedule_windows": [{"days": [0, 1, 2, 3, 4], "start": "09:00", "end": "17:00"}]},
+    )
+    assert saved.status_code == 200
+    windows = saved.json()["schedule"]["windows"]
+    assert windows[0]["start"] == "09:00"
+    assert store.get_setting("schedule_windows")
+    cleared = client.post("/api/settings", json={"schedule_windows": []})
+    assert cleared.json()["schedule"]["enabled"] is False
+
 
