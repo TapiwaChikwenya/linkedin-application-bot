@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+{% block title %}Questions · APPLY/OPS{% endblock %}
+{% block content %}
+  <div class="memory-hero">
+    <section class="memory-panel">
+      <h2>Memory queue</h2>
+      <p class="muted">
+        Approved answers are local RAG memory. Llama weights are never fine-tuned.
+        Captured prompts are classified (email, years, yes/no) before you answer.
+        Heuristics work if Ollama is down; Llama only cleans wording.
+      </p>
+      <div class="memory-kpis">
+        <span>PENDING <b id="kpiPending">0</b></span>
+        <span>APPROVED <b id="kpiApproved">0</b></span>
+        <span>REJECTED <b id="kpiRejected">0</b></span>
+      </div>
+    </section>
+    <section class="memory-panel seed-panel" id="seeds">
+      <h2>Generate seed questions</h2>
+      <p class="muted">
+        One click inserts pending Easy Apply prompts from skill years, resume tools, and
+        common screening patterns. Seeds stay pending. They are never auto-approved.
+        Duplicates are skipped.
+      </p>
+      <div class="toolbar" style="margin:10px 0 0">
+        <button id="seedBtn" class="seed-btn" type="button">Generate seed questions</button>
+        <span class="muted" id="seedStatus"></span>
+      </div>
+    </section>
+  </div>
+  <form class="toolbar" onsubmit="return false;">
+    <input id="query" type="search" placeholder="search question, job, answer">
+    <select id="status">
+      <option value="pending">pending</option>
+      <option value="approved">approved</option>
+      <option value="rejected">rejected</option>
+      <option value="">all</option>
+    </select>
+    <select id="kind">
+      <option value="">all kinds</option>
+    </select>
+    <button class="chip active" type="button" data-origin="">all src</button>
+    <button class="chip" type="button" data-origin="linkedin">linkedin</button>
+    <button class="chip" type="button" data-origin="seed">seed</button>
+    <button class="chip" type="button" data-origin="llm">llm</button>
+    <span class="muted" id="counts"></span>
+    <span class="muted">A approve · R reject · J/K move</span>
+  </form>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Question</th>
+          <th>Kind</th>
+          <th>Source</th>
+          <th>Seen</th>
+          <th>Last job</th>
+          <th>Proposed</th>
+          <th>Answer</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+const skipped = new Set();
+const pendingActs = new Set();
+let currentOrigin = "";
+let selectedId = "";
+function isPlaceholderOption(option) {
+  const text = String(option || "").trim().toLowerCase();
+  return !text || text === "select" || text === "select an option" || text === "please select"
+    || text === "[email]" || text === "[phone]" || text === "email" || text === "email address"
+    || text === "email addresses" || text === "[redacted-email]" || text === "[redacted-phone]";
+}
+function optionList(row) {
+  const kind = (row.classified_kind || row.kind || "").toLowerCase();
+  if (["email", "tel", "text", "number"].includes(kind)) return "";
+  const options = (row.options || []).filter(option => !isPlaceholderOption(option));
+  if (!options.length) return "";
+  return `<div class="muted">${options.map(esc).join(" · ")}</div>`;
+}
+function answerControl(row) {
+  const kind = (row.classified_kind || row.kind || "").toLowerCase();
+  const shape = (row.answer_shape || "").toLowerCase();
+  const value = esc(row.prefill || row.approved_value || "");
+  const inputKinds = ["email", "tel", "text", "number"];
+  if (inputKinds.includes(kind) || inputKinds.includes(shape)) {
+    let type = "text";
+    if (kind === "number" || shape === "number") type = "number";
+    else if (kind === "tel" || shape === "tel") type = "tel";
+    else if (kind === "email") type = "email";
+    return `<input type="${type}" data-answer="${esc(row.question_id)}" value="${value}" placeholder="answer">`;
+  }
+  const options = (row.options || []).filter(option => !isPlaceholderOption(option));
+  if (options.length) {
+    const opts = options.map(option => {
+      const selected = String(option).toLowerCase() === String(row.prefill || row.approved_value || "").toLowerCase() ? " selected" : "";
+      return `<option value="${esc(option)}"${selected}>${esc(option)}</option>`;
+    }).join("");
+    return `<select data-answer="${esc(row.question_id)}">${opts}</select>`;
+  }
+  return `<input data-answer="${esc(row.question_id)}" value="${value}" placeholder="answer">`;
+}
+function originLabel(row) {
+  const origin = row.origin || row.source || "";
+  return pill(origin);
+}
+function kindBadge(row) {
+  const kind = row.classified_kind || row.kind || "";
+  const labels = {
+    email: "email",
+    tel: "phone",
+    number: "years",
+    yes_no: "yes/no",
+    text: "text",
+    select: "select",
+    textarea: "textarea",
+    file: "file",
+    date: "date",
+    unknown: "unknown"
+  };
+  const label = labels[kind] || kind || "text";
+  return `<span class="pill kind-${esc(kind || "text")}">${esc(label)}</span>`;
+}
+function setCounts(counts, origins) {
+  const pending = counts.pending || 0;
+  const approved = counts.approved || 0;
+  const rejected = counts.rejected || 0;
+  countUp(document.getElementById("kpiPending"), pending, "");
+  document.getElementById("kpiApproved").textContent = approved;
+  document.getElementById("kpiRejected").textContent = rejected;
+  const originBits = origins
+    ? " · " + (origins.linkedin || 0) + " li · " + (origins.seed || 0) + " seed · " + (origins.llm || 0) + " llm"
+    : "";
+  document.getElementById("counts").textContent =
+    pending + " pending · " + approved + " approved · " + rejected + " rejected" + originBits;
+}
+async function loadQuestions() {
+  const params = new URLSearchParams({
+    q: document.getElementById("query").value,
+    status: document.getElementById("status").value,
+    kind: document.getElementById("kind").value,
+    source: currentOrigin
+  });
+  let data;
+  try {
+    const response = await fetchWithTimeout("/api/questions?" + params.toString(), {}, 8000);
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (err) {
+    showError("Could not load questions.");
+    return;
+  }
+  const kindSelect = document.getElementById("kind");
+  const currentKind = kindSelect.value;
+  const kinds = data.kinds || [];
+  kindSelect.innerHTML = `<option value="">all kinds</option>` + kinds.map(kind =>
+    `<option value="${esc(kind)}"${kind === currentKind ? " selected" : ""}>${esc(kind)}</option>`
+  ).join("");
+  setCounts(data.counts || {}, data.origins || {});
+  const rows = (data.questions || []).filter(row => !skipped.has(String(row.question_id)));
+  if (selectedId && !rows.some(row => String(row.question_id) === selectedId)) selectedId = "";
+  if (!selectedId && rows[0]) selectedId = String(rows[0].question_id);
+  document.getElementById("rows").innerHTML = rows.map(row => `
+    <tr data-row="${esc(row.question_id)}" class="${String(row.question_id) === selectedId ? "selected" : ""}">
+      <td>${esc(row.cleaned_question || row.question_text || "")}${optionList(row)}</td>
+      <td>${kindBadge(row)}</td>
+      <td>${originLabel(row)}</td>
+      <td>${esc(row.seen_count || 0)}</td>
+      <td>${esc(row.last_job_title || "")}${row.last_job_company ? `<div class="muted">${esc(row.last_job_company)}</div>` : ""}</td>
+      <td>${esc(row.proposed_value || "")}</td>
+      <td>${answerControl(row)}</td>
+      <td>${pill(row.status)}</td>
+      <td class="row-actions">
+        <button class="approve" type="button" data-act="approve" data-id="${esc(row.question_id)}">Approve</button>
+        <button class="reject" type="button" data-act="reject" data-id="${esc(row.question_id)}">Reject</button>
+        <button class="skip" type="button" data-act="skip" data-id="${esc(row.question_id)}">Skip</button>
+      </td>
+    </tr>
+  `).join("") || emptyQuestionsRow();
+}
+function emptyQuestionsRow() {
+  const status = document.getElementById("status").value;
+  if (status === "pending") {
+    return `<tr><td colspan="9" class="muted">No pending questions. Use <a href="#seeds">Generate seed questions</a> to grow the queue. Seeds stay pending until you approve them.</td></tr>`;
+  }
+  return `<tr><td colspan="9" class="muted">No questions in this filter.</td></tr>`;
+}
+function valueFor(id) {
+  const field = document.querySelector(`[data-answer="${CSS.escape(id)}"]`);
+  return field ? field.value : "";
+}
+function selectRow(id) {
+  selectedId = String(id || "");
+  document.querySelectorAll("tr[data-row]").forEach(row => {
+    row.classList.toggle("selected", row.getAttribute("data-row") === selectedId);
+  });
+}
+async function actOn(id, act) {
+  if (!id) return;
+  if (act === "skip") {
+    skipped.add(id);
+    const row = document.querySelector(`tr[data-row="${CSS.escape(id)}"]`);
+    if (row) row.remove();
+    return;
+  }
+  const key = act + ":" + id;
+  if (pendingActs.has(key)) return;
+  pendingActs.add(key);
+  questionMutation += 1;
+  const button = document.querySelector(`button[data-act="${CSS.escape(act)}"][data-id="${CSS.escape(id)}"]`);
+  if (button) button.disabled = true;
+  const url = act === "approve" ? "/api/questions/approve" : "/api/questions/reject";
+  const body = act === "approve"
+    ? {question_id: id, approved_value: valueFor(id)}
+    : {question_id: id};
+  try {
+    const result = await api("POST", url, body);
+    if (!result.ok) {
+      showError(result.error || result.detail || "Question update failed.");
+      return;
+    }
+    showError("");
+    loadQuestions();
+  } catch (err) {
+    showError(err && err.name === "AbortError" ? "Question update timed out." : String(err || "Question update failed."));
+  } finally {
+    pendingActs.delete(key);
+    questionMutation = Math.max(0, questionMutation - 1);
+    if (button) button.disabled = false;
+  }
+}
+document.getElementById("rows").addEventListener("click", async (event) => {
+  const row = event.target.closest("tr[data-row]");
+  if (row) selectRow(row.getAttribute("data-row"));
+  const button = event.target.closest("button[data-act]");
+  if (!button) return;
+  await actOn(button.getAttribute("data-id"), button.getAttribute("data-act"));
+});
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (typingTarget(event.target) && event.key.toLowerCase() !== "escape") return;
+  const rows = [...document.querySelectorAll("tr[data-row]")];
+  const index = rows.findIndex(row => row.getAttribute("data-row") === selectedId);
+  const key = event.key.toLowerCase();
+  if (key === "j" || key === "arrowdown") {
+    event.preventDefault();
+    const next = rows[Math.min(rows.length - 1, index + 1)] || rows[0];
+    if (next) selectRow(next.getAttribute("data-row"));
+  } else if (key === "k" || key === "arrowup") {
+    event.preventDefault();
+    const prev = rows[Math.max(0, index - 1)] || rows[0];
+    if (prev) selectRow(prev.getAttribute("data-row"));
+  } else if (key === "a" && !typingTarget(event.target)) {
+    event.preventDefault();
+    actOn(selectedId, "approve");
+  } else if (key === "r" && !typingTarget(event.target)) {
+    event.preventDefault();
+    actOn(selectedId, "reject");
+  }
+});
+document.getElementById("seedBtn").addEventListener("click", async () => {
+  const button = document.getElementById("seedBtn");
+  const status = document.getElementById("seedStatus");
+  if (button.disabled) return;
+  button.disabled = true;
+  questionMutation += 1;
+  status.textContent = "generating…";
+  try {
+    const result = await api("POST", "/api/questions/generate-seeds", {});
+    if (!result.ok) {
+      showError(result.error || result.detail || "Seed generation failed.");
+      status.textContent = "";
+      return;
+    }
+    showError("");
+    status.textContent = (result.inserted || 0) + " inserted · " + (result.skipped || 0) + " already present";
+    showNote((result.inserted || 0) + " seed question(s) inserted. Approve answers before they enter RAG memory.");
+    loadQuestions();
+  } catch (err) {
+    showError(err && err.name === "AbortError" ? "Seed generation timed out." : String(err || "Seed generation failed."));
+    status.textContent = "";
+  } finally {
+    questionMutation = Math.max(0, questionMutation - 1);
+    button.disabled = false;
+  }
+});
+document.querySelectorAll(".chip[data-origin]").forEach(chip => {
+  chip.addEventListener("click", () => {
+    currentOrigin = chip.getAttribute("data-origin") || "";
+    document.querySelectorAll(".chip[data-origin]").forEach(item => item.classList.toggle("active", item === chip));
+    loadQuestions();
+  });
+});
+document.getElementById("query").addEventListener("input", loadQuestions);
+document.getElementById("status").addEventListener("change", loadQuestions);
+document.getElementById("kind").addEventListener("change", loadQuestions);
+let classifyStarted = false;
+async function classifyPendingOnce() {
+  if (classifyStarted) return;
+  classifyStarted = true;
+  try {
+    await fetchWithTimeout("/api/questions/classify-pending", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: "{}"
+    }, 40000);
+  } catch (err) {
+    /* Heuristics already ran on capture; Llama polish is best-effort. */
+  }
+  loadQuestions();
+}
+loadQuestions();
+classifyPendingOnce();
+</script>
+{% endblock %}

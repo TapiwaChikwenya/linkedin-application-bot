@@ -170,6 +170,9 @@ mainConfig.py
 # Local runtime data and secrets
 .env
 data/
+
+# Personal resumes must never be committed
+*.pdf
 debug_page_source.html
 debug_screenshot.png
 easy_apply_failure_*.html

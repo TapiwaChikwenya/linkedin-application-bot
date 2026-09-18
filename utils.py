@@ -1,6 +1,6 @@
-import math,constants,config
+import math,constants,config,time
 from typing import List
-import time
+from urllib.parse import parse_qs, quote, urlparse
 
 from selenium.webdriver.firefox.options import Options
 
@@ -53,11 +53,10 @@ def jobsToPages(numOfJobs: str) -> int:
   return number_of_pages
 
 def urlToKeywords(url: str) -> List[str]:
-    keywordUrl = url[url.index("keywords=")+9:]
-    keyword = keywordUrl[0:keywordUrl.index("&") ] 
-    locationUrl =  url[url.index("location=")+9:]
-    location = locationUrl[0:locationUrl.index("&") ] 
-    return [keyword,location]
+    query = parse_qs(urlparse(url).query)
+    keyword = (query.get("keywords") or [""])[0]
+    location = (query.get("location") or [""])[0]
+    return [keyword, location]
 
 def writeResults(text: str):
     timeStr = time.strftime("%Y%m%d")
@@ -98,12 +97,23 @@ class LinkedinUrlGenerate:
         path = []
         for location in config.location:
             for keyword in config.keywords:
-                    url = constants.linkJobUrl + "?f_AL=true&keywords=" +keyword+self.jobType()+self.remote()+self.checkJobLocation(location)+self.jobExp()+self.datePosted()+self.salary()+self.sortBy()
+                    url = (
+                        constants.linkJobUrl
+                        + "?f_AL=true&keywords="
+                        + quote(keyword)
+                        + self.jobType()
+                        + self.remote()
+                        + self.checkJobLocation(location)
+                        + self.jobExp()
+                        + self.datePosted()
+                        + self.salary()
+                        + self.sortBy()
+                    )
                     path.append(url)
         return path
 
     def checkJobLocation(self,job):
-        jobLoc = "&location=" +job
+        jobLoc = "&location=" + quote(job)
         match job.casefold():
             case "asia":
                 jobLoc += "&geoId=102393603"

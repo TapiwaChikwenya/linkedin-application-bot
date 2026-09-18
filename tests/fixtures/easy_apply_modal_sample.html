@@ -1,0 +1,54 @@
+<!--
+  Forensic fixture for LinkedIn SDUI Easy Apply (Sep 2026 redesign).
+  Light-DOM sections are verbatim from data/easy_apply_page_4468860218.html.
+  Shadow-DOM modal section is reconstructed from failure PNGs because
+  driver.page_source serializes the interop host as an empty element.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Easy Apply forensic fixture</title></head>
+<body>
+<section id="light-dom-job-page">
+  <h1>Data Engineer</h1>
+  <!-- SDUI apply entry point (light DOM) -->
+  <a class="b486132d _50ad7bd2 _67a9738c _0ba0898b _52727ad1 _5a6bf141 cde1c789 _84103a25 b08c389c _709faf48 _55256228 b588e11e _727090de _5a567015" aria-disabled="false" href="https://www.linkedin.com/jobs/view/4468860218/apply/?openSDUIApplyFlow=true&amp;trackingId=ouivkPf2QYKib0KeCvgHGQ%3D%3D" componentkey="8544a4d3-cd6c-415c-b8ab-a2889cc7ec1f" aria-label="Easy Apply to this job">
+  <!-- Decoy Next button on job page carousel (NOT Easy Apply) -->
+  <button class="b486132d _50ad7bd2 _67a9738c _0ba0898b _52727ad1 _5a6bf141 cde1c789 _0d51308a b08c389c _709faf48 _55256228 b588e11e _727090de _7eddd18c d2d0625d _1609d57a" type="button" data-testid="carousel-inline-right-button" aria-label="Next"></button>
+</section>
+<section id="light-dom-interop-host">
+  <!-- Empty in page_source; modal renders in attached closed shadow root -->
+  <div id="interop-outlet" data-testid="interop-shadowdom" style="width: 100vw; position: absolute; z-index: 500; font-size: 1.6rem; visibility: visible;" class="theme--light"></div>
+  <iframe data-testid="interop-iframe" tabindex="-1" style="opacity: 0; z-index: -1; width: 100vw; height: 100vh; position: absolute; top: 0px;" allow="clipboard-read; clipboard-write; display-capture" referrerpolicy="origin" src="/preload/?_bprMode=vanilla"></iframe>
+</section>
+<section id="shadow-dom-easy-apply-modal" data-fixture-note="synthetic reconstruction from PNGs">
+  <div role="dialog" aria-modal="true" aria-labelledby="apply-dialog-title">
+    <header>
+      <h1 id="apply-dialog-title">Apply to Example Corp</h1>
+      <button type="button" aria-label="Dismiss">
+        <svg aria-hidden="true"></svg>
+      </button>
+    </header>
+    <div role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+      <span>0%</span>
+    </div>
+    <main>
+      <h2>Contact info</h2>
+      <!-- Native inputs appear in reconstructions; production contact widgets are often nested closed-shadow comboboxes. -->
+      <input type="email" aria-label="Email address" value="[REDACTED]" required>
+      <select aria-label="Phone country code" required>
+        <option selected>United States (+1)</option>
+      </select>
+      <input type="tel" aria-label="Mobile phone number" value="[REDACTED]" required>
+      <div data-testid="nested-closed-combobox-host">
+        <div role="combobox" aria-label="City" aria-expanded="false"></div>
+      </div>
+    </main>
+    <footer>
+      <button type="button" aria-label="Next">
+        <svg aria-hidden="true"></svg>
+      </button>
+    </footer>
+  </div>
+</section>
+</body>
+</html>
