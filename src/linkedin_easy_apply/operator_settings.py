@@ -194,11 +194,11 @@ def normalize_days(raw: Any) -> list[int]:
     if raw in (None, ""):
         return list(range(7))
     if not isinstance(raw, (list, tuple)):
-        raise ValueError("schedule days must be a list")
+        raise TypeError("schedule days must be a list")
     days: list[int] = []
     for item in raw:
         if isinstance(item, bool):
-            raise ValueError("invalid schedule day")
+            raise TypeError("invalid schedule day")
         if isinstance(item, int):
             number = item
         else:
@@ -225,11 +225,11 @@ def normalize_windows(raw: Any) -> list[dict[str, Any]]:
         except json.JSONDecodeError as exc:
             raise ValueError("schedule must be JSON") from exc
     if not isinstance(raw, list):
-        raise ValueError("schedule must be a list of windows")
+        raise TypeError("schedule must be a list of windows")
     windows: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise ValueError("each schedule window must be an object")
+            raise TypeError("each schedule window must be an object")
         start = parse_hhmm(str(item.get("start") or ""))
         end = parse_hhmm(str(item.get("end") or ""))
         days = normalize_days(item.get("days"))
@@ -339,7 +339,7 @@ def redact_secrets(text: str) -> str:
         if password:
             value = value.replace(password, "[redacted]")
     except Exception:  # noqa: BLE001 - config import is best-effort for redaction
-        pass
+        return value
     return value
 
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from linkedin_easy_apply.operator_settings import (
     normalize_windows,
@@ -22,7 +22,7 @@ def test_schedule_window_includes_weekday_noon():
     windows = normalize_windows(
         [{"days": [4], "start": "09:00", "end": "17:00"}]
     )
-    now = datetime(2026, 9, 18, 12, 0)
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
     status = schedule_status(now=now, windows=windows)
     assert status["enabled"] is True
     assert status["active"] is True
@@ -34,11 +34,11 @@ def test_schedule_window_excludes_evening_and_weekend():
         [{"days": [0, 1, 2, 3, 4], "start": "09:00", "end": "17:00"}]
     )
     friday_evening = schedule_status(
-        now=datetime(2026, 9, 18, 20, 0),
+        now=datetime(2026, 9, 18, 20, 0, tzinfo=timezone.utc),
         windows=windows,
     )
     saturday = schedule_status(
-        now=datetime(2026, 9, 19, 12, 0),
+        now=datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc),
         windows=windows,
     )
     assert friday_evening["enabled"] is True
@@ -48,7 +48,7 @@ def test_schedule_window_excludes_evening_and_weekend():
 
 
 def test_empty_schedule_is_manual_only():
-    status = schedule_status(now=datetime(2026, 9, 18, 12, 0), windows=[])
+    status = schedule_status(now=datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc), windows=[])
     assert status["enabled"] is False
     assert status["active"] is True
     assert "manual" in status["reason"]
@@ -56,7 +56,7 @@ def test_empty_schedule_is_manual_only():
 
 def test_all_day_window_covers_local_calendar_day():
     windows = normalize_windows([{"days": [4], "start": "00:00", "end": "23:59"}])
-    status = schedule_status(now=datetime(2026, 9, 18, 23, 30), windows=windows)
+    status = schedule_status(now=datetime(2026, 9, 18, 23, 30, tzinfo=timezone.utc), windows=windows)
     assert status["active"] is True
 
 
@@ -75,14 +75,14 @@ def test_scheduler_starts_only_at_window_open(tmp_path):
         stop_run=lambda: calls.__setitem__("stop", calls["stop"] + 1),
         is_alive=lambda: alive["value"],
     )
-    inside = scheduler.tick(now=datetime(2026, 9, 18, 10, 0))
+    inside = scheduler.tick(now=datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc))
     assert inside["action"] == "start"
     assert calls["start"] == 1
     alive["value"] = True
-    again = scheduler.tick(now=datetime(2026, 9, 18, 11, 0))
+    again = scheduler.tick(now=datetime(2026, 9, 18, 11, 0, tzinfo=timezone.utc))
     assert again["action"] == "idle"
     assert calls["start"] == 1
     alive["value"] = True
-    closed = scheduler.tick(now=datetime(2026, 9, 18, 18, 0))
+    closed = scheduler.tick(now=datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc))
     assert closed["action"] == "stop"
     assert calls["stop"] == 1

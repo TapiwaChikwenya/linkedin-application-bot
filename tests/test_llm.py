@@ -96,6 +96,7 @@ def test_build_prompt_contains_facts_and_questions():
     assert "ADF years" in prompt
     assert '"question_id": "q0"' in prompt
     assert "Do not invent" in prompt
+    assert "interpolate related skill years" in prompt
 
 
 def test_normalize_answers_rejects_unknown_ids_and_invalid_field_values():
@@ -540,6 +541,138 @@ def test_generate_json_empty_when_ollama_down(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("down")),
     )
     assert llm.generate_json("prompt", FIT_RESPONSE_FORMAT, config_module=Cfg) == {}
+    result = llm.generate_json_result("prompt", FIT_RESPONSE_FORMAT, config_module=Cfg)
+    assert result.payload == {}
+    assert result.error_kind == llm.GENERATE_UNREACHABLE
+    assert result.error == "Ollama not reachable"
+
+
+def test_not_ready_reason_distinguishes_status_failures():
+    from linkedin_easy_apply.llm import not_ready_reason
+
+    assert not_ready_reason({"ready": True}) == ("", "")
+    assert not_ready_reason({"ready": False, "mode": "off", "detail": "disabled"}) == (
+        "disabled",
+        "Ollama not ready",
+    )
+    assert not_ready_reason(
+        {"ready": False, "detail": "Ollama not reachable: URLError"}
+    ) == ("unreachable", "Ollama not reachable")
+    assert not_ready_reason(
+        {"ready": False, "detail": "Ollama is up; pull llama3.2", "model": "llama3.2"}
+    ) == ("missing_model", "model missing")
+
+
+def test_classify_generate_exception_timeout_is_not_not_ready():
+    import urllib.error
+
+    from linkedin_easy_apply.llm import classify_generate_exception
+
+    kind, message = classify_generate_exception(TimeoutError("timed out"), timeout_sec=90)
+    assert kind == "timeout"
+    assert message == "generate timeout (90s)"
+    kind, message = classify_generate_exception(TimeoutError("timed out"), timeout_sec=180)
+    assert kind == "timeout"
+    assert message == "generate timeout (180s)"
+    wrapped = urllib.error.URLError(TimeoutError("timed out"))
+    kind, message = classify_generate_exception(wrapped, timeout_sec=90)
+    assert kind == "timeout"
+    assert message == "generate timeout (90s)"
+    kind, message = classify_generate_exception(
+        urllib.error.URLError("connection refused"), timeout_sec=90
+    )
+    assert kind == "unreachable"
+    assert message == "Ollama not reachable"
+    missing = urllib.error.HTTPError(
+        "http://127.0.0.1:11434/api/generate",
+        404,
+        "Not Found",
+        hdrs=None,
+        fp=None,
+    )
+    kind, message = classify_generate_exception(missing, timeout_sec=90)
+    assert kind == "missing_model"
+    assert message == "model missing"
+
+
+def test_generate_json_result_timeout_when_ollama_ready(monkeypatch):
+    import json
+
+    from linkedin_easy_apply import llm
+    from linkedin_easy_apply.job_fit import FIT_RESPONSE_FORMAT, FIT_TIMEOUT_SEC
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if str(url).endswith("/api/tags"):
+            return FakeResponse({"models": [{"name": "unit-model:latest"}]})
+        raise TimeoutError("timed out")
+
+    class Cfg:
+        llm_mode = "ollama"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+
+    llm._STATUS_CACHE.clear()
+    monkeypatch.setattr("linkedin_easy_apply.llm.urllib.request.urlopen", fake_urlopen)
+    result = llm.generate_json_result(
+        "score this job",
+        FIT_RESPONSE_FORMAT,
+        config_module=Cfg,
+        timeout=FIT_TIMEOUT_SEC,
+    )
+    assert result.payload == {}
+    assert result.error_kind == llm.GENERATE_TIMEOUT
+    assert result.error == f"generate timeout ({FIT_TIMEOUT_SEC}s)"
+    assert result.error == "generate timeout (180s)"
+    assert "not ready" not in result.error
+
+
+def test_generate_json_result_missing_model_from_status(monkeypatch):
+    import json
+
+    from linkedin_easy_apply import llm
+    from linkedin_easy_apply.job_fit import FIT_RESPONSE_FORMAT
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        return FakeResponse({"models": [{"name": "other:latest"}]})
+
+    class Cfg:
+        llm_mode = "ollama"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+
+    llm._STATUS_CACHE.clear()
+    monkeypatch.setattr("linkedin_easy_apply.llm.urllib.request.urlopen", fake_urlopen)
+    result = llm.generate_json_result("prompt", FIT_RESPONSE_FORMAT, config_module=Cfg)
+    assert result.payload == {}
+    assert result.error_kind == llm.GENERATE_MISSING_MODEL
+    assert result.error == "model missing"
 
 
 def test_sensitive_llm_answers_stay_pending_even_after_success(tmp_path):
@@ -595,3 +728,101 @@ def test_sensitive_llm_answers_stay_pending_even_after_success(tmp_path):
     still = store.get_question(stored["id"])
     assert still["approval_status"] == "pending"
     store.close()
+
+
+def test_warmup_loads_model_within_budget(monkeypatch):
+    import json
+
+    from linkedin_easy_apply import llm
+
+    captured = {}
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        url = request.full_url if hasattr(request, "full_url") else request
+        captured.setdefault("timeouts", []).append(timeout)
+        if str(url).endswith("/api/tags"):
+            return FakeResponse({"models": [{"name": "unit-model:latest"}]})
+        captured["generate_timeout"] = timeout
+        return FakeResponse({"response": json.dumps({"ok": True})})
+
+    class Cfg:
+        llm_mode = "ollama"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+
+    llm._STATUS_CACHE.clear()
+    monkeypatch.setattr("linkedin_easy_apply.llm.urllib.request.urlopen", fake_urlopen)
+    result = llm.warmup_ollama(config_module=Cfg, budget_sec=15)
+    assert result["ok"] is True
+    assert result["warmed"] is True
+    assert result["detail"] == "Ollama warmup: model loaded"
+    assert captured["generate_timeout"] <= 15
+    assert "not ready" not in result["detail"].lower()
+
+
+def test_warmup_timeout_is_not_not_ready(monkeypatch):
+    import json
+
+    from linkedin_easy_apply import llm
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if str(url).endswith("/api/tags"):
+            return FakeResponse({"models": [{"name": "unit-model:latest"}]})
+        raise TimeoutError("timed out")
+
+    class Cfg:
+        llm_mode = "ollama"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+
+    llm._STATUS_CACHE.clear()
+    monkeypatch.setattr("linkedin_easy_apply.llm.urllib.request.urlopen", fake_urlopen)
+    result = llm.warmup_ollama(config_module=Cfg, budget_sec=15)
+    assert result["ready"] is True
+    assert result["warmed"] is False
+    assert result["error_kind"] == llm.GENERATE_TIMEOUT
+    assert "generate timeout" in result["detail"]
+    assert "not ready" not in result["detail"].lower()
+
+
+def test_warmup_skips_when_ollama_off():
+    from linkedin_easy_apply import llm
+
+    class Cfg:
+        llm_mode = "off"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+
+    llm._STATUS_CACHE.clear()
+    result = llm.warmup_ollama(config_module=Cfg, budget_sec=15)
+    assert result["ok"] is False
+    assert result["warmed"] is False
+    assert result["error_kind"] == llm.GENERATE_DISABLED
+    assert "Ollama not ready" in result["detail"]

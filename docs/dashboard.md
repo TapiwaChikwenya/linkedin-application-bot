@@ -280,8 +280,10 @@ animate width. Apply is lime, skip is amber, fail is red.
 
 Header keys: `S` start, `X` stop, ignored while typing in an input.
 
-The header **FIT** ticker reads `/api/status` `last_fit` `{score, decision, line}`
-even when `/api/metrics` is empty or fails. Apply is lime, skip is amber.
+The header **FIT** ticker reads `/api/status` `last_fit`
+`{score, decision, line, error_kind}` even when `/api/metrics` is empty or fails.
+A generate timeout shows `timeout` on FIT and `llm.last_fit_error`; the LLM chip
+stays ready when Ollama is up. Apply is lime, skip is amber.
 `Job fit llama=0.82 apply` and `Skipped before open: intern. Job: <url>` are
 colored in the event stream the same way. Pre-click card skips never open the
 job page; Live still shows them as amber skip rows. Applications keeps a Fit
@@ -457,6 +459,45 @@ Tags and chat use short dedicated timeouts in a thread pool so a hung Ollama gen
 
 See [configuration](configuration.md#operator-settings-overlay).
 
+### Tests and regression gate
+
+**Purpose:** Keep the Settings page (`/models`), Ollama picker, resume upload, chat,
+caps, and schedule honest whenever new features land. Tests talk to FastAPI
+`TestClient` and mock Ollama (`GET /api/tags`, `/api/chat`, `ollama pull`
+subprocess). They never start the LinkedIn worker and never pull large models
+on the host.
+
+**Scope:** `tests/test_models_settings.py` plus overlapping dashboard, store, and
+question tests. The default gate is the **full** suite:
+
+```powershell
+python -m pytest tests -q
+```
+
+That command is configured in `pyproject.toml` (`testpaths = ["tests"]`,
+`addopts = "-q"`). `scripts/test-regression.ps1` wraps it and then runs Ruff.
+GitHub Actions (`.github/workflows/ci.yml`) runs the same pytest invocation.
+Do not treat a feature as done until `pytest tests -q` is green.
+
+**Inputs / outputs:** mocked Ollama JSON, tmp SQLite, PDF bytes written under the
+test `data/resumes/` folder. Assertions cover model list, active-model persist
+(`llm.ollama_model()` / `/api/status`), background pull, chat without passwords,
+PDF-only resume size cap, gitignore, caps/schedule, Questions 200, email
+select→text repair, and legacy `jobs` table init without `outcome`.
+
+**Failure paths:** Ollama down → 503 on list/chat; invalid model → 400; `.exe` /
+`.txt` / oversized upload → 400; cross-origin mutations → 403; deleting the
+resume a live worker is using → 409.
+
+```mermaid
+flowchart TD
+  A[New feature lands] --> B["pytest tests -q"]
+  B --> C{Green?}
+  C -->|no| D[Fix or fail clearly]
+  C -->|yes| E[Optional scripts/test-regression.ps1 Ruff]
+  E --> F[CI pytest tests -q]
+```
+
 ## LinkedIn Login
 
 ### Feature purpose
@@ -556,7 +597,8 @@ pending-question count.
 - Artifact URLs only serve `easy_apply_failure_*`, `easy_apply_page_*`, and `job_load_*`.
 - `/api/status` includes `linkedin_easy_apply.llm.status()`, `llm_ready`, Ollama
   process/pull flags and `tokens` when known, `search`, `last_job` / `last_decision`,
-  `last_fit` (score, decision, log line for Live), `metrics`, `groups`, `pace`, quota
+  `last_fit` (score, decision, log line, and `error_kind` timeout vs unreachable),
+  `llm.last_fit_error` when the last gate failed, `metrics`, `groups`, `pace`, quota
   remaining (run and day), pending question counts, `hotkeys`, `last_error`, and the
   start contract string.
 - `GET /api/metrics` returns today and last-7-day windows (`by_sector`,

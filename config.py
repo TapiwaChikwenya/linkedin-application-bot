@@ -67,12 +67,29 @@ ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2").strip() or "llama3.2"
 # Local Llama job-fit gate. Skip the listing when fit is below this or decision is skip.
 job_fit_threshold = _env_float("LINKEDIN_JOB_FIT_THRESHOLD", 0.55)
 
+
+def _env_timeout_sec(name: str, default: int = 180, minimum: int = 90) -> int:
+    raw = os.getenv(name, "")
+    if not str(raw).strip():
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+# CPU llama3.2 can spend ~30s ingesting a fit prompt plus generate. Keep at least 90s;
+# default 180s so a cold model is not cut off. Form-fill generate stays on the 90s client.
+job_fit_timeout_sec = _env_timeout_sec("LINKEDIN_JOB_FIT_TIMEOUT_SEC", 180, 90)
+
 # These settings are for running Linkedin job apply bot
 LinkedinBotProPasswrod = os.getenv("LINKEDIN_BOT_PRO_PASSWORD", "")
 # location you want to search the jobs - ex : ["Poland", "Singapore", "New York City Metropolitan Area", "Monroe County"]
 # continent locations:["Europe", "Asia", "Australia", "NorthAmerica", "SouthAmerica", "Africa", "Australia"]
 location = ["United States"]
-# keywords related with your job search
+# keywords related with your job search. Multi-word values are quoted in the
+# LinkedIn URL so results must contain that phrase, not scattered tokens.
+# blackListTitles are also sent as Boolean NOT terms at search time.
 keywords = [
     "Senior Data Engineer",
     "Data Engineer",
@@ -97,6 +114,7 @@ sort = ["Recent"]
 #Blacklist companies you dont want to apply - ex: ["Apple","Google"]
 blacklist = ["EPAM Anywhere"]
 #Blaclist keywords in title - ex:["manager", ".Net"]
+# Also appended to the LinkedIn keywords query as NOT intern NOT junior …
 blackListTitles = ["intern", "internship", "junior", "entry level", "staffing", "unpaid"]
 #Only Apply these companies -  ex: ["Apple","Google"] -  leave empty for all companies 
 onlyApply = [""]

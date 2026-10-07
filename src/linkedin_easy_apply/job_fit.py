@@ -11,9 +11,11 @@ from typing import Any
 FIT_THRESHOLD = 0.55
 MIN_SNIPPET_CHARS = 80
 SNIPPET_LIMIT = 1200
+COMPACT_SNIPPET_LIMIT = 400
 SKILL_LIMIT = 16
 APPROVED_FACTS_LIMIT = 8
-FIT_TIMEOUT_SEC = 25
+FIT_TIMEOUT_MIN_SEC = 90
+FIT_TIMEOUT_SEC = 180
 FIT_NUM_PREDICT = 160
 
 FIT_RESPONSE_FORMAT: dict[str, Any] = {
@@ -30,6 +32,10 @@ FIT_LOG_RE = re.compile(
     r"Job fit llama=([0-9]+(?:\.[0-9]+)?)\s+(apply|skip)(?::\s*(.*))?\s*$",
     re.IGNORECASE,
 )
+FIT_SKIP_RE = re.compile(
+    r"Job fit llama skipped:\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,7 @@ class JobFitResult:
     skip_job: bool
     needs_description: bool = False
     threshold: float = FIT_THRESHOLD
+    error_kind: str = ""
 
     def log_line(self) -> str:
         if self.needs_description and not self.ready:
@@ -67,6 +74,7 @@ class JobFitResult:
             "ready": self.ready,
             "line": self.log_line(),
             "needs_description": self.needs_description,
+            "error_kind": self.error_kind,
         }
 
 
@@ -76,6 +84,37 @@ def compact_text(value: str, limit: int = SNIPPET_LIMIT) -> str:
 
 def snippet_is_usable(snippet: str, minimum: int = MIN_SNIPPET_CHARS) -> bool:
     return len(compact_text(snippet)) >= minimum
+
+
+def job_fit_timeout_sec(config_module: Any | None = None) -> int:
+    """Effective job-fit generate timeout. Default 180s, never below 90s on CPU."""
+    import config as default_config
+
+    cfg = config_module or default_config
+    raw = getattr(cfg, "job_fit_timeout_sec", None)
+    if raw is None or raw == "":
+        raw = os.getenv("LINKEDIN_JOB_FIT_TIMEOUT_SEC", FIT_TIMEOUT_SEC)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = FIT_TIMEOUT_SEC
+    return max(FIT_TIMEOUT_MIN_SEC, value)
+
+
+def error_kind_from_fit_detail(detail: str) -> str:
+    """Operator-facing class for a skipped gate. Timeout is never 'not_ready'."""
+    text = str(detail or "").strip().lower()
+    if "generate timeout" in text or text.startswith("timeout"):
+        return "timeout"
+    if "not reachable" in text:
+        return "unreachable"
+    if "model missing" in text:
+        return "missing_model"
+    if "not ready" in text or text == "disabled":
+        return "not_ready"
+    if "invalid" in text or "empty generate" in text:
+        return "invalid"
+    return "not_ready" if text else ""
 
 
 def fit_threshold(config_module: Any | None = None) -> float:
@@ -127,13 +166,34 @@ def build_fit_prompt(
     company: str,
     snippet: str,
     profile: dict[str, Any],
+    compact: bool = False,
 ) -> str:
+    job = {
+        "title": compact_text(title, 200),
+        "company": compact_text(company, 200),
+        "snippet": compact_text(snippet, COMPACT_SNIPPET_LIMIT if compact else SNIPPET_LIMIT),
+    }
+    if compact:
+        payload: dict[str, Any] = {
+            "job": job,
+            "keywords": list(profile.get("keywords") or [])[:8],
+            "skills": list(profile.get("skills") or [])[:8],
+        }
+        intro = (
+            "You score whether this LinkedIn job is a fit from title and snippet only.\n"
+            "Use only the job title/company/snippet plus keywords and skills.\n"
+            "Do not invent experience, employers, degrees, clearances, or skills.\n"
+            "If the posting is staffing or recruiter spam, intern, unpaid, or clearly "
+            "unrelated to the keywords and skills, decision is skip.\n"
+            "fit is a number from 0 to 1.\n"
+            "decision is exactly apply or skip.\n"
+            "reason is a short phrase under 80 characters.\n"
+            "Return JSON only with this shape:\n"
+            '{"fit":0.0,"reason":"...","decision":"apply"}\n\n'
+        )
+        return intro + json.dumps(payload, ensure_ascii=True)
     payload = {
-        "job": {
-            "title": compact_text(title, 200),
-            "company": compact_text(company, 200),
-            "snippet": compact_text(snippet, SNIPPET_LIMIT),
-        },
+        "job": job,
         "applicant_profile": profile,
     }
     return (
@@ -200,6 +260,47 @@ def normalize_fit_payload(
     )
 
 
+def _as_generate_result(value: Any, timeout_sec: int) -> Any:
+    from linkedin_easy_apply.llm import GenerateJsonResult
+
+    if isinstance(value, GenerateJsonResult):
+        return value
+    if isinstance(value, dict) and value:
+        return GenerateJsonResult(payload=value, timeout_sec=timeout_sec)
+    return GenerateJsonResult(
+        payload={},
+        error_kind="empty",
+        error="Ollama not ready",
+        timeout_sec=timeout_sec,
+    )
+
+
+def _invoke_fit_generate(
+    producer: Any | None,
+    prompt: str,
+    config_module: Any | None,
+    timeout_sec: int,
+) -> Any:
+    from linkedin_easy_apply.llm import generate_json_result
+
+    if producer is None:
+        return generate_json_result(
+            prompt,
+            FIT_RESPONSE_FORMAT,
+            config_module=config_module,
+            timeout=timeout_sec,
+            num_predict=FIT_NUM_PREDICT,
+        )
+    raw = producer(
+        prompt,
+        FIT_RESPONSE_FORMAT,
+        config_module=config_module,
+        timeout=timeout_sec,
+        num_predict=FIT_NUM_PREDICT,
+    )
+    return _as_generate_result(raw, timeout_sec)
+
+
 def evaluate_listing_fit(
     *,
     title: str,
@@ -212,7 +313,8 @@ def evaluate_listing_fit(
 ) -> JobFitResult:
     """Score a search card or job-page excerpt. Short card snippets defer instead of guessing.
 
-    If Ollama is down or returns garbage, `skip_job` is False so the run continues.
+    Timeout, unreachable, or missing model never sets `skip_job`. Deterministic filters
+    already passed, so Easy Apply still runs.
     """
     threshold = fit_threshold(config_module)
     compact_snippet = compact_text(snippet, SNIPPET_LIMIT)
@@ -227,30 +329,38 @@ def evaluate_listing_fit(
             needs_description=True,
             threshold=threshold,
         )
-    from linkedin_easy_apply.llm import generate_json as default_generate_json
-
-    producer = generate_json or default_generate_json
     profile = compact_fit_profile(config_module, store)
     prompt = build_fit_prompt(title, company, compact_snippet, profile)
-    payload = producer(
-        prompt,
-        FIT_RESPONSE_FORMAT,
-        config_module=config_module,
-        timeout=FIT_TIMEOUT_SEC,
-        num_predict=FIT_NUM_PREDICT,
+    timeout_sec = job_fit_timeout_sec(config_module)
+    generated = _invoke_fit_generate(
+        generate_json, prompt, config_module, timeout_sec
     )
-    if not payload:
+    if not generated.payload and generated.error_kind == "timeout":
+        retry = _invoke_fit_generate(
+            generate_json,
+            build_fit_prompt(title, company, compact_snippet, profile, compact=True),
+            config_module,
+            timeout_sec,
+        )
+        if retry.payload:
+            generated = retry
+    if not generated.payload:
+        reason = generated.error or "Ollama not ready"
+        kind = str(generated.error_kind or "")
+        if kind not in {"timeout", "unreachable", "missing_model", "disabled", "not_ready"}:
+            kind = error_kind_from_fit_detail(reason)
         return JobFitResult(
             ready=False,
             fit=None,
             decision="apply",
-            reason="Ollama not ready",
+            reason=reason,
             source=source,
             skip_job=False,
             threshold=threshold,
+            error_kind=kind,
         )
     return normalize_fit_payload(
-        payload,
+        generated.payload,
         threshold=threshold,
         source=source,
         ready=True,
@@ -258,18 +368,31 @@ def evaluate_listing_fit(
 
 
 def parse_fit_log(message: str) -> dict[str, Any] | None:
-    match = FIT_LOG_RE.search(str(message or "").strip())
-    if not match:
+    text = str(message or "").strip()
+    match = FIT_LOG_RE.search(text)
+    if match:
+        score = float(match.group(1))
+        decision = match.group(2).lower()
+        reason = compact_text(match.group(3) or "")
+        return {
+            "score": score,
+            "decision": decision,
+            "reason": reason,
+            "line": compact_text(text, 200),
+            "ready": True,
+            "error_kind": "",
+        }
+    skip = FIT_SKIP_RE.search(text)
+    if not skip:
         return None
-    score = float(match.group(1))
-    decision = match.group(2).lower()
-    reason = compact_text(match.group(3) or "")
+    reason = compact_text(skip.group(1), 120)
     return {
-        "score": score,
-        "decision": decision,
+        "score": None,
+        "decision": "apply",
         "reason": reason,
-        "line": compact_text(message, 200),
-        "ready": True,
+        "line": compact_text(text, 200),
+        "ready": False,
+        "error_kind": error_kind_from_fit_detail(reason),
     }
 
 
@@ -312,4 +435,5 @@ def last_fit_status(
         "job_id": str(job.get("job_id") or ""),
         "line": line,
         "ready": fit is not None,
+        "error_kind": error_kind_from_fit_detail(reason) if fit is None else "",
     }

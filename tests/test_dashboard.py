@@ -71,6 +71,9 @@ def test_dashboard_home_renders(tmp_path):
     assert "Start run" in response.text
     assert "href=\"/questions\"" in response.text
     assert "href=\"/models\"" in response.text
+    assert 'id="settingsNav"' in response.text
+    assert ">Settings</a>" in response.text
+    assert 'href="#"' not in response.text.split("id=\"settingsNav\"")[0][-40:]
     assert "Start run = Ollama + worker" in response.text
     assert 'id="loginBtn"' in response.text
     assert "CAPS" in response.text
@@ -133,7 +136,12 @@ def test_console_pages_render(tmp_path):
     assert "Resume PDF" in models.text
     assert "Model chat" in models.text
     assert "Schedule" in models.text
-    assert client.get("/settings").status_code == 200
+    assert 'id="settingsNav"' in models.text
+    assert 'href="/models"' in models.text
+    settings = client.get("/settings")
+    assert settings.status_code == 200
+    assert "Ollama models" in settings.text
+    assert "Resume PDF" in settings.text
 
 
 def test_live_console_is_operator_shell(tmp_path):
@@ -1026,6 +1034,33 @@ def test_last_fit_survives_metrics_failure(tmp_path, monkeypatch):
     assert client.get("/applications").status_code == 200
 
 
+def test_last_fit_timeout_error_class_does_not_mark_llm_down(tmp_path, monkeypatch):
+    client, store = _client(tmp_path)
+    run_id = store.start_run("fit-timeout")
+    store.add_event(run_id, "info", "7", "Job fit llama skipped: generate timeout (180s)")
+    monkeypatch.setattr(
+        "linkedin_easy_apply.dashboard.app.llm_status",
+        lambda: {
+            "mode": "auto",
+            "ready": True,
+            "host": "http://127.0.0.1:11434",
+            "model": "llama3.2",
+            "detail": "model present",
+        },
+    )
+    status = client.get("/api/status").json()
+    assert status["llm"]["ready"] is True
+    assert status["llm"]["detail"] == "model present"
+    assert status["llm"]["last_fit_error"] == "timeout"
+    assert "not ready" not in str(status["llm"]["last_fit_detail"]).lower()
+    assert status["last_fit"]["error_kind"] == "timeout"
+    assert status["last_fit"]["line"] == "Job fit llama skipped: generate timeout (180s)"
+    store.add_event(run_id, "info", "8", "Job fit llama skipped: Ollama not reachable")
+    status = client.get("/api/status").json()
+    assert status["last_fit"]["error_kind"] == "unreachable"
+    assert status["llm"]["last_fit_error"] == "unreachable"
+
+
 def test_login_opens_firefox_profile(tmp_path, monkeypatch):
     import config
 
@@ -1268,7 +1303,7 @@ def test_resume_upload_activate_and_reject_non_pdf(tmp_path):
 
 
 def test_cannot_delete_resume_used_by_running_apply(tmp_path):
-    client, store, worker, _ollama = _harness(tmp_path)
+    client, _store, worker, _ollama = _harness(tmp_path)
     pdf = b"%PDF-1.4\ntrailer\n%%EOF\n"
     client.post("/api/resumes", files={"file": ("live.pdf", pdf, "application/pdf")})
     worker.status = lambda: {
@@ -1292,7 +1327,7 @@ def test_start_rejected_outside_schedule(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "firefoxProfileRootDir", "")
     monkeypatch.setattr("linkedin_easy_apply.dashboard.app.is_profile_locked", lambda _path: False)
     client, store, _worker, ollama = _harness(tmp_path)
-    other_day = (datetime.now().weekday() + 1) % 7
+    other_day = (datetime.now().astimezone().weekday() + 1) % 7
     store.set_setting(
         "schedule_windows",
         json.dumps([{"days": [other_day], "start": "09:00", "end": "17:00"}]),

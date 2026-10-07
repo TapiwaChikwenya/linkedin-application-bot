@@ -327,10 +327,11 @@ def test_fill_known_fields_skips_job_when_required_question_unanswered(monkeypat
     monkeypatch.setattr(config, "yes_no_answers", [])
     monkeypatch.setattr(config, "phone_number", "")
 
+    logged: list[str] = []
     bot = Linkedin.__new__(Linkedin)
     bot.store = store
     bot.current_job_details = {"title": "Data Engineer", "company": "Acme"}
-    bot.observe = lambda *args, **kwargs: None
+    bot.observe = lambda msg, *args, **kwargs: logged.append(str(msg))
     fields = [
         {
             "question": "How many years of SQL experience do you have?",
@@ -346,6 +347,13 @@ def test_fill_known_fields_skips_job_when_required_question_unanswered(monkeypat
             "required": True,
             "options": [],
         },
+        {
+            "question": "Will you require sponsorship?",
+            "kind": "select",
+            "options": ["Yes", "No"],
+            "value": "",
+            "required": True,
+        },
     ]
     bot.collect_form_state = lambda dialog: (fields, "form")
     bot.attachResume = lambda dialog: None
@@ -353,7 +361,8 @@ def test_fill_known_fields_skips_job_when_required_question_unanswered(monkeypat
     bot.fill_llm_fields = lambda *args, **kwargs: None
 
     reason = bot.fillKnownFields(None, "4466303632")
-    assert reason == "Unanswered required question: What is your favorite color?"
+    assert reason == "Unanswered required question: Will you require sponsorship?"
+    assert "Skipped sensitive unanswered" in logged
     store.close()
 
 

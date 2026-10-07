@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse
 
 from linkedin_easy_apply.llm import chat_complete, clear_status_cache, list_remote_models
 from linkedin_easy_apply.operator_settings import (
@@ -34,7 +33,6 @@ from linkedin_easy_apply.operator_settings import (
     resolved_resume_path,
     resume_dir,
     safe_resume_name,
-    schedule_status,
 )
 from linkedin_easy_apply.store import Store
 
@@ -93,15 +91,7 @@ def register_operator_routes(
     worker: Any,
     ollama: Any,
     data_dir: str,
-    templates: Jinja2Templates,
-    context_fn: Any,
 ) -> None:
-    def models_page(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "models.html", context_fn(request))
-
-    app.add_api_route("/models", models_page, methods=["GET"], response_class=HTMLResponse)
-    app.add_api_route("/settings", models_page, methods=["GET"], response_class=HTMLResponse)
-
     @app.get("/api/settings")
     def api_settings() -> dict[str, Any]:
         payload = _settings_payload(store)
@@ -115,23 +105,34 @@ def register_operator_routes(
         require_same_origin(request)
         body = await mutation_payload(request)
         try:
-            if "ollama_model" in body and str(body.get("ollama_model") or "").strip():
-                name = normalize_model_name(str(body.get("ollama_model") or ""))
+            model_value = body.get("ollama_model") if "ollama_model" in body else body.get("model")
+            if str(model_value or "").strip():
+                name = normalize_model_name(str(model_value or ""))
                 store.set_setting(SETTING_OLLAMA_MODEL, name)
                 if hasattr(ollama, "model"):
                     ollama.model = name
                 clear_status_cache()
-            if "max_applications_per_day" in body:
-                store.set_setting(SETTING_DAY_CAP, str(int(body.get("max_applications_per_day"))))
-            if "max_applications_per_run" in body:
-                store.set_setting(SETTING_RUN_CAP, str(int(body.get("max_applications_per_run"))))
+            day_value = (
+                body.get("max_applications_per_day")
+                if "max_applications_per_day" in body
+                else body.get("day_cap", body.get("max_per_day"))
+            )
+            if day_value is not None and day_value != "":
+                store.set_setting(SETTING_DAY_CAP, str(int(day_value)))
+            run_value = (
+                body.get("max_applications_per_run")
+                if "max_applications_per_run" in body
+                else body.get("run_cap", body.get("max_per_run"))
+            )
+            if run_value is not None and run_value != "":
+                store.set_setting(SETTING_RUN_CAP, str(int(run_value)))
             if "applicant_summary" in body:
                 store.set_setting(
                     SETTING_SUMMARY,
                     redact_secrets(str(body.get("applicant_summary") or ""))[:MAX_SUMMARY_CHARS],
                 )
-            if "schedule_windows" in body:
-                windows = normalize_windows(body.get("schedule_windows"))
+            if "schedule_windows" in body or "windows" in body:
+                windows = normalize_windows(body.get("schedule_windows", body.get("windows")))
                 store.set_setting(SETTING_SCHEDULE, json.dumps(windows))
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -147,6 +148,7 @@ def register_operator_routes(
         payload = {
             "ok": bool(listed.get("ok")),
             "active": active,
+            "model": active,
             "models": listed.get("models") or [],
             "host": listed.get("host") or "",
             "ollama": ollama_status,
@@ -197,6 +199,17 @@ def register_operator_routes(
                 status_code=503,
             )
         return JSONResponse({"ok": True, "pulling": True, "model": name, "ollama": result})
+
+    @app.get("/api/models/pull")
+    def api_pull_status() -> dict[str, Any]:
+        ollama_status = ollama.status() if hasattr(ollama, "status") else {}
+        return {
+            "ok": True,
+            "pulling": bool(ollama_status.get("pulling")),
+            "model": ollama_status.get("pull_model") or resolved_ollama_model(store=store),
+            "pull_progress": ollama_status.get("pull_progress") or "",
+            "ollama": ollama_status,
+        }
 
     @app.get("/api/models/chat")
     def api_chat_history() -> dict[str, Any]:
@@ -279,7 +292,10 @@ def register_operator_routes(
         }
 
     @app.post("/api/resumes")
-    async def api_resume_upload(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    async def api_resume_upload(
+        request: Request,
+        file: UploadFile = File(...),  # noqa: B008
+    ) -> dict[str, Any]:
         from linkedin_easy_apply.dashboard.app import require_same_origin
 
         require_same_origin(request)
@@ -315,7 +331,8 @@ def register_operator_routes(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Resume not found")
         active = resolved_resume_path(store=store)
-        alive = bool(getattr(worker, "status", lambda: {})().get("alive"))
+        status_fn = getattr(worker, "status", dict)
+        alive = bool(status_fn().get("alive"))
         if alive and active and os.path.abspath(str(path)) == os.path.abspath(active):
             raise HTTPException(
                 status_code=409,

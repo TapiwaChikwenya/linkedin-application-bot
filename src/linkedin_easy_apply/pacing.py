@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 HUMAN_DELAYS: dict[str, tuple[float, float]] = {
     "search_page": (6.0, 12.0),
+    "list_scan": (0.2, 0.5),
     "job_view": (10.0, 22.0),
     "skip": (3.5, 8.0),
     "apply_step": (2.5, 6.0),
@@ -19,6 +20,7 @@ HUMAN_DELAYS: dict[str, tuple[float, float]] = {
 
 FAST_DELAYS: dict[str, tuple[float, float]] = {
     "search_page": (1.0, 2.0),
+    "list_scan": (0.0, 0.05),
     "job_view": (1.0, 2.0),
     "skip": (0.4, 0.8),
     "apply_step": (0.25, 0.5),

@@ -32,15 +32,16 @@ mappings for retrieval, not training data.
 | `OLLAMA_MODEL` | Default `llama3.2`. Use `llama3.2-vision` to send a screenshot. Dashboard **Settings** or SQLite `operator_settings.ollama_model` overrides this when set |
 | `LINKEDIN_APPLICANT_SUMMARY` | Optional extra truthful facts for short text questions |
 | `LINKEDIN_JOB_FIT_THRESHOLD` | Skip the listing when Llama fit is below this. Default `0.55` |
+| `LINKEDIN_JOB_FIT_TIMEOUT_SEC` | Job-fit generate timeout. Default `180`. Minimum `90` on CPU llama3.2. Form-fill generate stays 90s |
 | Resume PDF | Text extract for leftover generation and seed-tool hints |
 | `config.py` `keywords` / `years_experience` keys | Compact fit-profile skills and search keywords |
 | `config.py` `years_experience` / `yes_no_answers` | **Bootstrap keyword maps**, used only when no approved row matches |
 | Approved dashboard answers | Operator-confirmed mappings in SQLite `questions` |
 
 Outputs: filled form controls, plus `skipped_fit` / `needs_review` job rows.
-If Ollama is down, the worker still uses approved memory, then bootstrap maps,
-and **does not skip the whole run**. The fit gate is skipped; leftover required
-fields still skip that one job rather than guessing.
+If Ollama is down, the worker still uses approved memory, interpolated related
+answers, then bootstrap maps, and **does not skip the whole run**. The fit gate
+is skipped. Only leftover **sensitive** required fields skip that one job.
 
 ## Dependencies
 
@@ -55,40 +56,138 @@ Worker fill order on each Easy Apply step:
 1. **Approved RAG memory** — `Store.retrieve_approved_answers` for the current
    field. Exact `normalized_question` wins; otherwise a conservative token overlap
    is used so "SQL years" does not match "Python years".
-2. **Mapped config bootstrap** — specific skill years and specific Yes/No keyword
-   rules in `config.py`. These are hardcoded shortcuts, not learned weights.
-3. **Ollama generation** — leftover unanswered fields. The prompt includes a
-   compact `approved_answers` slice plus resume/config facts.
-4. **Skip the job** — if a **required** field still has no approved, mapped, or
-   LLM answer, the worker dismisses the modal and records `needs_review`. That is
-   smart skip, not "fill everything". Optional fields may stay empty and pending.
-
-Generic catch-alls are not used: there is no `years_experience["default"]`
-fallback, and rules such as `experience → Yes` are ignored even if they reappear
-in config. Unmatched questions stay empty rather than guessing "9 years" or "Yes".
+2. **Interpolated retrieval** — related approved answers when exact/overlap miss.
+   Skill years may copy an integer from a nearest related skill (Databricks from
+   Spark/PySpark) with an `Interpolated years X from Y` note. Same-family Yes/No
+   may copy an approved value. Work authorization and sponsorship stay distinct:
+   never interpolate one from the other.
+3. **Mapped config bootstrap** — specific skill years and specific Yes/No keyword
+   rules in `config.py`. If the question names a mapped skill, that integer is
+   used. If that key is missing, the nearest related family member is used.
+   There is still no global `years_experience["default"]` (no invented 9).
+4. **Ollama first pass** — leftover unanswered fields. The prompt includes a
+   compact `approved_answers` slice plus resume/config facts. Llama may infer
+   short text (400 character cap) from `resume_text` and approved snippets, and
+   interpolate related skill years. It must omit legal, demographic, salary,
+   clearance, and sponsorship facts that are not in those sources.
+5. **Ollama second pass** — if the first pass omitted **required non-sensitive**
+   fields. Prompt: infer only from `applicant_facts` and `approved_answers`;
+   interpolate related skill years; omit only if there is no evidence.
+6. **Conservative inferred fallback** — still-empty required non-sensitive fields
+   may take a grounded integer from a *specific* mapped skill named in the
+   question (or its related family). Unknown skills stay empty.
+7. **Skip the job** — only if a **required sensitive** field is still empty
+   (`needs_review`, log `Skipped sensitive unanswered`). Non-sensitive required
+   fields with no evidence stay empty and do **not** abandon the application.
 
 ```mermaid
 flowchart TD
   A[Easy Apply modal opens] --> B[Walk light DOM and open shadow roots]
   B --> C[Fill phone, city, resume]
-  C --> D{Approved SQLite answer for this field?}
+  C --> D{Approved SQLite exact or overlap?}
   D -->|yes| E[Type approved value]
-  D -->|no| F{Specific config map?}
-  F -->|yes| G[Type bootstrap map]
+  D -->|no| DI{Related approved interpolation?}
+  DI -->|yes| DJ[Type interpolated value]
+  DI -->|no| F{Specific or related config map?}
+  F -->|yes| G[Type bootstrap or related years]
   F -->|no| H{Ollama ready?}
   H -->|no| I[Leave empty and capture pending]
-  H -->|yes| J[Retrieve matching approved Q and A]
+  H -->|yes| J[Retrieve matching and related approved Q and A]
   J --> K[Generate from facts plus approved_answers]
-  K --> L[Validate ID, field type, option, confidence]
+  K --> K2{Required non-sensitive omitted?}
+  K2 -->|yes| K3[Second pass: infer, interpolate, omit only if no evidence]
+  K2 -->|no| L[Validate ID, field type, option, confidence]
+  K3 --> L
   L --> M[Apply grounded JSON answers]
-  E --> N[Upsert observed fields]
+  E --> N[Conservative inferred fallback]
+  DJ --> N
   G --> N
   M --> N
   I --> N
-  N --> P{Required field still empty?}
+  N --> P{Required sensitive field still empty?}
   P -->|yes| Q[Skip job needs_review]
   P -->|no| O[Click Next or Submit]
 ```
+
+## Inference versus skip policy
+
+### Feature purpose
+
+Raise Easy Apply completion rate by letting Llama **infer and interpolate**
+grounded leftover answers instead of abandoning the job whenever Ollama omits a
+field. The worker still refuses to invent legal, demographic, salary, clearance,
+or sponsorship facts.
+
+### Scope
+
+In scope: related skill-year interpolation, same-family Yes/No interpolation,
+short-text summaries from `resume_text` plus approved snippets (400 character
+cap), a second Ollama pass for required non-sensitive leftovers, a conservative
+mapped-skill fallback, and skip-only-sensitive `needs_review`.
+
+Out of scope: fine-tuning, a global `years_experience["default"]` of 9, inferring
+sponsorship from work authorization, and logging resume body text.
+
+### Inputs and outputs
+
+| Input | Purpose |
+|---|---|
+| `years_experience` skill keys | Exact integer, then nearest related family member |
+| Approved SQLite answers | Exact, overlap, then interpolated related rows |
+| `resume_text` / `applicant_facts` | Evidence for short text and second-pass inference |
+| `is_sensitive_question` | Sponsorship, authorization, salary, clearance, demographics |
+
+Outputs: filled integers/Yes-No/short text, log lines `Inferred: …`,
+`Interpolated years X from Y`, and `Skipped sensitive unanswered`. Empty
+non-sensitive required fields continue. Empty sensitive required fields skip
+the job as `needs_review`.
+
+### Functional flow
+
+```mermaid
+flowchart TD
+  A[Leftover required field] --> B{Sensitive?}
+  B -->|yes| C{Approved, mapped, or explicit fact?}
+  C -->|no| D[Skip job: Skipped sensitive unanswered]
+  C -->|yes| E[Fill grounded value]
+  B -->|no| F{Related skill years or same-family Yes/No?}
+  F -->|yes| G[Interpolate integer or Yes/No]
+  F -->|no| H[Ollama pass 1]
+  H --> I{Omitted?}
+  I -->|yes| J[Ollama pass 2: omit only if no evidence]
+  I -->|no| E
+  J --> K{Still empty?}
+  K -->|named mapped skill| L[Conservative integer from that skill]
+  K -->|no evidence| M[Leave empty; do not skip]
+  L --> E
+  G --> E
+```
+
+### Architecture
+
+`linkedin_easy_apply.inference` owns skill families, Yes/No families, integer
+coercion, and leftover detection. `store.match_approved_answers` calls it after
+exact/overlap. `linkedin.py` logs notes without resume text. `llm.answer_unanswered`
+runs the second generate only when required non-sensitive fields were omitted.
+
+### Failure paths
+
+- No evidence for a non-sensitive field: leave empty, capture pending, continue.
+- Sensitive required still empty after retrieval/maps: skip `needs_review`.
+- Ollama down: interpolation and mapped related years still run; no second pass.
+- Unknown skill such as COBOL: never filled with a global 9.
+
+### Security considerations
+
+Sponsorship, work authorization, salary, clearance, disability, race, gender,
+and veteran questions are never inferred from a related family that is not
+theirs. Resume text is not written to event logs.
+
+### Performance considerations
+
+Interpolation is in-process and cheaper than generate. The second Ollama pass
+runs only for omitted required non-sensitive leftovers on that step, same
+temperature 0 JSON schema as the first pass.
 
 ## Job-fit scoring
 
@@ -121,6 +220,7 @@ and restyling the dashboard.
 | `years_experience` keys | Top skills (catchall `default` omitted) |
 | Approved SQLite facts | Compact RAG slice, not the full history |
 | `LINKEDIN_JOB_FIT_THRESHOLD` | Default `0.55` |
+| `LINKEDIN_JOB_FIT_TIMEOUT_SEC` | Default `180`, floored at `90` |
 
 Outputs: log lines `Job fit llama=0.82 apply` or
 `Job fit llama=0.21 skip: staffing recruiter`. Skip rows use status
@@ -129,26 +229,28 @@ Outputs: log lines `Job fit llama=0.82 apply` or
 ### Dependencies
 
 Same local Ollama process as form RAG. `linkedin_easy_apply.job_fit` calls
-`llm.generate_json` with a fit schema. Search-card HTML parsing stays in
-`job_card.py`.
+`llm.generate_json_result` with a fit schema and a 180s timeout (form fill keeps
+its own 90s client). Search-card HTML parsing stays in `job_card.py`.
 
 ### Functional flow
 
 ```mermaid
 flowchart TD
-  A[Search card] --> B{Title/company/Easy Apply filters}
+  A[Search URL quoted keywords plus NOT exclusions] --> B{Title/company/workplace/Easy Apply filters}
   B -->|fail| C[skipped_filter / already_applied / no Easy Apply]
   B -->|pass| D{Card snippet long enough?}
-  D -->|yes| E[Llama fit JSON temperature 0]
+  D -->|yes| E[Llama fit JSON temperature 0, 180s]
   D -->|no| F[Open job page description]
   F --> E
-  E --> G{Ollama ready?}
-  G -->|no| H[Log skip-gate and continue]
-  G -->|yes| I{fit less than 0.55 or decision skip?}
+  E --> G{Generate result}
+  G -->|timeout| R[Retry title plus snippet]
+  R --> G
+  G -->|not ready / unreachable / timeout| H[Log skip-gate and continue apply]
+  G -->|JSON| I{fit less than 0.55 or decision skip?}
   I -->|yes| J[skipped_fit plus reason]
   I -->|no| K[Click Easy Apply]
-  K --> L[Approved then mapped then Llama fill]
-  L --> M{Required leftover?}
+  K --> L[Approved then interpolate then mapped then Llama fill]
+  L --> M{Required sensitive leftover?}
   M -->|yes| N[needs_review skip]
   M -->|no| O[Submit]
 ```
@@ -174,12 +276,19 @@ facts for leftover short answers.
 
 ### Failure paths
 
-- Ollama down or `LINKEDIN_LLM=off`: log `Job fit llama skipped: Ollama not ready`
-  and continue. The run does not stop.
+- `LINKEDIN_LLM=off`: log `Job fit llama skipped: Ollama not ready` and continue.
+  The run does not stop. `skip_job` stays false, so Easy Apply still runs when
+  deterministic filters already passed.
+- Ollama unreachable: `Job fit llama skipped: Ollama not reachable`. Same continue.
+- Model missing: `Job fit llama skipped: model missing`. Same continue.
+- Generate urllib timeout: `Job fit llama skipped: generate timeout (180s)`. This is
+  not "not ready" while `status().ready` is true. One retry uses a title+snippet
+  prompt; if that also times out, still apply.
 - Invalid JSON or missing `fit`: treat as gate skipped, do not skip the job.
 - Short card snippet: `needs_description`; worker scores after the description
   is on the page, still before Easy Apply.
-- Required form field with no grounded answer: skip that job as `needs_review`.
+- Required **sensitive** form field with no grounded answer: skip that job as
+  `needs_review`. Required non-sensitive leftovers are inferred or left empty.
 
 ### Security considerations
 
@@ -189,8 +298,12 @@ Keep `OLLAMA_HOST` on localhost.
 
 ### Performance considerations
 
-Fit uses `num_predict=160` and a 25s timeout so a hung generate cannot stall
-the run the way a 90s form fill might. Human pacing remains the larger delay.
+Fit uses `num_predict=160` and a 180s timeout so CPU `llama3.2` can ingest a
+~1000 token prompt (about 30s) plus generate without a urllib timeout being
+misread as Ollama down. Form-fill generate stays on the 90s Ollama client.
+Worker startup runs a cheap `GET /api/tags` and an optional tiny generate
+(budget 15s) so the first listing is not a cold ingest. On timeout the gate
+retries once with title+snippet only. Human pacing remains the larger delay.
 Scoring from card text avoids opening junk pages when the sibling extract
 already has a usable snippet.
 
@@ -548,18 +661,23 @@ LoRA to Ollama. The frozen `llama3.2` weights stay unchanged.
 
 Retrieve-then-generate:
 
-1. Approved SQLite answers fill first when they match the live field.
-2. Specific `config.py` maps fill next. They are a bootstrap, not a trained
-   policy. Generic experience→Yes and default→N years are omitted.
+1. Approved SQLite answers fill first when they match the live field (exact,
+   then conservative overlap, then related interpolation).
+2. Specific `config.py` maps fill next, including related skill years. They are
+   a bootstrap, not a trained policy. Generic experience→Yes and default→N years
+   are omitted. Unknown skills are never filled with 9.
 3. For leftover fields, `Store.retrieve_approved_answers` keeps rows that match
    the current questions. Exact `normalized_question` wins; otherwise a
-   high-precision token overlap is used.
+   high-precision token overlap; otherwise related skill years or same-family
+   Yes/No. Sponsorship is never taken from a work-authorization row.
 4. Only that compact slice (default 12) is injected as `approved_answers` with
-   `source_id`. `applicant_facts["approved_answers"]` carries the same slice,
-   never the whole history.
-5. The prompt requires: use `approved_answers` when present; omit on conflict or
-   when the answer is not in facts/approved list; return `confidence` and
-   `source_ids`. Existing `q0` question ids stay.
+   `source_id` and optional interpolation `note`. `applicant_facts["approved_answers"]`
+   carries the same slice, never the whole history.
+5. First-pass prompt: use `approved_answers` when present; interpolate related
+   skill years; summarize short text from resume snippets; omit sensitive facts
+   that are not in sources. Second pass (required non-sensitive leftovers only):
+   infer only from `applicant_facts` and `approved_answers`; omit only if no
+   evidence. Return `confidence` and `source_ids`. Existing `q0` question ids stay.
 6. Typed LLM values are tagged `_llm_value` and upserted at the end of
    `fillKnownFields` as `source=llm`, `approval_status=pending`. Email/phone
    `proposed_value` is redacted. Sponsorship, authorization, salary, disability,
@@ -573,22 +691,28 @@ The next matching form retrieves those rows automatically.
 ## Failure paths
 
 - Ollama not installed or not running: worker continues with approved memory and
-  mapped bootstrap answers and logs `Job fit llama skipped: Ollama not ready`
-  plus `Ollama skipped: local model is not ready` on form fill. The run does not
-  stop.
-- Model missing: Ollama is marked not ready and reports the required `ollama pull`
-  command; no generation request is attempted.
+  mapped bootstrap answers and logs `Job fit llama skipped: Ollama not reachable`
+  (or `Ollama not ready` when `LINKEDIN_LLM=off`) plus `Ollama skipped: local
+  model is not ready` on form fill. The run does not stop.
+- Model missing: Ollama is marked not ready, reports the required `ollama pull`
+  command, and fit logs `Job fit llama skipped: model missing`; no generation
+  request is attempted.
+- Fit generate timeout: logs `Job fit llama skipped: generate timeout (180s)`,
+  retries once with a shorter title+snippet prompt, then continues Easy Apply.
 - The model returns an unknown question ID, a non-numeric value for a number field,
   or a value outside a select/radio option list: that answer is discarded.
 - The model omits a question or returns an essay longer than 400 characters: that field
-  is left empty. If it was **required**, the job is skipped as `needs_review`.
+  is left empty. Required **non-sensitive** leftovers get a second infer pass, then a
+  conservative mapped-skill fallback. Required **sensitive** leftovers skip the job as
+  `needs_review` (`Skipped sensitive unanswered`).
 - Fit JSON is invalid: the gate is skipped and Easy Apply may still run.
 - Closed shadow roots are walked with WebDriver `element.shadow_root`. A vision model plus
   screenshot remains a fallback when a nested closed tree still cannot be serialized.
 
 Live-run events expose only counts and state: whether Ollama was invoked or skipped and
-why, plus accepted/applied/rejected answer totals. Questions, generated values, resume
-text, and contact values are intentionally omitted.
+why, plus accepted/applied/rejected answer totals, `Inferred: {question}`,
+`Interpolated years X from Y`, and `Skipped sensitive unanswered`. Generated values,
+resume text, and contact values are intentionally omitted.
 
 ## Security considerations
 
@@ -603,6 +727,47 @@ is still the larger delay. Prefer `llama3.2` (text) over vision unless selectors
 missing the modal. Approved memory fills are a SQLite lookup and are cheap compared
 with generation.
 
+## Troubleshooting
+
+False `Job fit llama skipped: Ollama not ready` after a ~25s urllib timeout used
+to mean CPU `llama3.2` was still ingesting while `GET /api/tags` already said
+ready. That is **not** Ollama down. The three skip strings are distinct:
+
+| Log line | Meaning | Operator action |
+|---|---|---|
+| `Job fit llama skipped: Ollama not ready` | `LINKEDIN_LLM=off` or status is unknown/not ready | Leave LLM on `auto` unless you meant to disable it |
+| `Job fit llama skipped: Ollama not reachable` | `/api/tags` or generate could not connect | Start Ollama from the dashboard; do not assume a timeout |
+| `Job fit llama skipped: generate timeout (180s)` | Ollama was ready; `/api/generate` hit the job-fit timeout | Easy Apply still runs. Raise `LINKEDIN_JOB_FIT_TIMEOUT_SEC` only if 180s is not enough. Check FIT ticker `error_kind=timeout`, not the LLM chip |
+
+`GET /api/status` `last_fit.error_kind` is `timeout` or `unreachable`.
+`llm.ready` / `llm.detail` stay `model present` on a generate timeout so the
+header LLM chip does not look down. `llm.last_fit_error` repeats the class.
+
+Worker start probes `/api/tags` and may run a tiny generate (15s budget), logged
+as `Ollama warmup: model loaded` or `Ollama warmup: generate timeout (15s); first
+job-fit may be slow`. Warmup never pulls models and never blocks more than ~15s.
+
+```mermaid
+flowchart TD
+  W[Worker start] --> T[GET /api/tags]
+  T -->|not ready| S[Log warmup skipped]
+  T -->|ready| G[Tiny generate budget 15s]
+  G -->|loaded| L[Ollama warmup: model loaded]
+  G -->|timeout| X[warmup timeout; first job-fit still 180s]
+  L --> J[Job-fit generate 180s]
+  X --> J
+  S --> J
+  J -->|TimeoutError while ready| E[Job fit llama skipped: generate timeout 180s]
+  J -->|tags/off| N[Job fit llama skipped: Ollama not ready]
+  J -->|connect fail| U[Job fit llama skipped: Ollama not reachable]
+  E --> A[Easy Apply continues]
+  N --> A
+  U --> A
+```
+
+Keep `LINKEDIN_JOB_FIT_TIMEOUT_SEC` at least 90 on CPU; default is 180. Form-fill
+generate stays 90s on its own client. Regression: `pytest tests -q`.
+
 ## How to run
 
 1. Install Ollama from https://ollama.com/download once.
@@ -614,6 +779,10 @@ with generation.
 5. To use another local tag, set `OLLAMA_MODEL` in `.env` (for example
    `llama3.2-vision`) or pick/pull a tag on dashboard **Settings**. That writes
    SQLite `operator_settings.ollama_model`; `.env` is the fallback.
+
+Offline regression for picker/chat/resume is `python -m pytest tests -q`
+(`tests/test_models_settings.py`). Those tests mock `/api/tags` and `/api/chat`;
+they do not `ollama pull` large models.
 
 Optional vision:
 

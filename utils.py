@@ -1,8 +1,10 @@
-import math,constants,config,time
+import math,constants,config,re,time
 from typing import List
 from urllib.parse import parse_qs, quote, urlparse
 
 from selenium.webdriver.firefox.options import Options
+
+_NOT_SPLIT = re.compile(r"\s+NOT\s+", re.IGNORECASE)
 
 def browserOptions():
     options = Options()
@@ -52,9 +54,60 @@ def jobsToPages(numOfJobs: str) -> int:
 
   return number_of_pages
 
+def clean_search_term(text: str) -> str:
+    return " ".join((text or "").replace('"', " ").split())
+
+
+def phrase_search_term(text: str) -> str:
+    """Quote multi-word terms so LinkedIn matches a phrase, not scattered tokens."""
+    cleaned = clean_search_term(text)
+    if not cleaned:
+        return ""
+    if " " in cleaned:
+        return f'"{cleaned}"'
+    return cleaned
+
+
+def excluded_search_terms(titles: list[str] | None = None) -> list[str]:
+    source = titles if titles is not None else getattr(config, "blackListTitles", [])
+    seen: set[str] = set()
+    terms: list[str] = []
+    for item in source or []:
+        term = phrase_search_term(str(item or ""))
+        key = term.lower()
+        if not term or key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+    return terms
+
+
+def search_keyword_query(keyword: str, excluded: list[str] | None = None) -> str:
+    """Build a LinkedIn keywords value: quoted phrase plus NOT title-blacklist terms."""
+    positive = phrase_search_term(keyword) or clean_search_term(keyword)
+    if not positive:
+        return ""
+    positive_l = positive.lower()
+    parts = [positive]
+    for term in excluded_search_terms(excluded):
+        bare = term.strip('"').lower()
+        if not bare or bare in positive_l:
+            continue
+        parts.append("NOT " + term)
+    return " ".join(parts)
+
+
+def positive_search_keyword(raw: str) -> str:
+    """Strip Boolean NOT tails and quotes for operator-facing logs."""
+    head = _NOT_SPLIT.split(raw or "", maxsplit=1)[0].strip()
+    if len(head) >= 2 and head[0] == '"' and head[-1] == '"':
+        return head[1:-1]
+    return head
+
+
 def urlToKeywords(url: str) -> List[str]:
     query = parse_qs(urlparse(url).query)
-    keyword = (query.get("keywords") or [""])[0]
+    keyword = positive_search_keyword((query.get("keywords") or [""])[0])
     location = (query.get("location") or [""])[0]
     return [keyword, location]
 
@@ -100,7 +153,7 @@ class LinkedinUrlGenerate:
                     url = (
                         constants.linkJobUrl
                         + "?f_AL=true&keywords="
-                        + quote(keyword)
+                        + quote(search_keyword_query(keyword))
                         + self.jobType()
                         + self.remote()
                         + self.checkJobLocation(location)

@@ -8,6 +8,7 @@ from linkedin_easy_apply.job_card import (
     SKIP_NO_EASY_APPLY,
     SKIP_TITLE_FILTER,
     SKIP_UNKNOWN_CARD,
+    SKIP_WORKPLACE,
     SearchCard,
     apply_card_fallbacks,
     card_skip_decision,
@@ -16,6 +17,7 @@ from linkedin_easy_apply.job_card import (
     parse_aria_label,
     parse_search_card,
     parse_search_cards,
+    should_skip_workplace,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "job_search_cards.html"
@@ -195,6 +197,50 @@ def test_inspect_search_card_skips_store_applied_without_dom(tmp_path):
     card, skip = bot.inspect_search_card(BoomOffer("", "4461000001"))
     assert card.source == "store"
     assert skip == ("already_applied", SKIP_ALREADY_APPLIED)
+
+
+def test_onsite_card_is_skipped_when_remote_hybrid_only(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "remote", ["Remote", "Hybrid"])
+    monkeypatch.setattr(config, "onlyApplyTitles", ["data engineer"])
+    monkeypatch.setattr(config, "blackListTitles", [])
+    monkeypatch.setattr(config, "blacklist", [])
+    monkeypatch.setattr(config, "onlyApply", [""])
+    remote = SearchCard(
+        job_id="1",
+        title="Senior Data Engineer",
+        company="Acme",
+        location="United States (Remote)",
+        apply_kind=APPLY_KIND_EASY,
+    )
+    onsite = SearchCard(
+        job_id="2",
+        title="Senior Data Engineer",
+        company="Acme",
+        location="Austin, Texas, United States (On-site)",
+        apply_kind=APPLY_KIND_EASY,
+    )
+    unknown = SearchCard(
+        job_id="3",
+        title="Senior Data Engineer",
+        company="Acme",
+        location="United States",
+        apply_kind=APPLY_KIND_EASY,
+    )
+    assert card_skip_decision(remote) is None
+    assert card_skip_decision(onsite) == ("skipped_filter", SKIP_WORKPLACE)
+    assert card_skip_decision(unknown) is None
+    assert should_skip_workplace("On-site") is True
+    assert should_skip_workplace("Hybrid") is False
+    assert jobs_allowed_to_open([remote, onsite, unknown]) == [remote, unknown]
+
+
+def test_job_identity_changed_only_when_page_differs_from_card():
+    card = SearchCard(title="Senior Data Engineer", company="Acme")
+    assert Linkedin.job_identity_changed(card, "Senior Data Engineer", "Acme") is False
+    assert Linkedin.job_identity_changed(card, "Staffing Recruiter", "Acme") is True
+    assert Linkedin.job_identity_changed(card, "Senior Data Engineer", "TempShop") is True
 
 
 def test_inspect_search_card_skips_intern_without_opening(monkeypatch):

@@ -260,7 +260,11 @@ def is_sensitive_question(text: str) -> bool:
     return any(hint in lowered for hint in ("clearance", "sponsorship", "disability"))
 
 
-def compact_approved_row(row: dict[str, Any], match: str = "exact") -> dict[str, str]:
+def compact_approved_row(
+    row: dict[str, Any],
+    match: str = "exact",
+    note: str = "",
+) -> dict[str, str]:
     question = str(
         row.get("raw_question") or row.get("question") or row.get("question_text") or ""
     ).strip()
@@ -270,12 +274,16 @@ def compact_approved_row(row: dict[str, Any], match: str = "exact") -> dict[str,
     ident = row.get("id")
     if ident in (None, ""):
         ident = row.get("question_id") or row.get("source_id")
-    return {
+    payload = {
         "source_id": str(ident or ""),
         "question": question,
         "value": value,
         "match": match,
     }
+    extra_note = str(note or row.get("note") or "").strip()
+    if extra_note:
+        payload["note"] = extra_note
+    return payload
 
 
 def conservative_token_overlap(query: str, stored: str) -> bool:
@@ -300,7 +308,9 @@ def match_approved_answers(
     questions: list[dict[str, Any]],
     limit: int = APPROVED_PROMPT_LIMIT,
 ) -> list[dict[str, str]]:
-    """Exact normalized match first, then conservative token overlap."""
+    """Exact match, conservative overlap, then related-skill / same-family interpolation."""
+    from linkedin_easy_apply.inference import interpolate_approved_for_question
+
     pool = [
         row
         for row in approved
@@ -309,8 +319,8 @@ def match_approved_answers(
     used: set[str] = set()
     matched: list[dict[str, str]] = []
 
-    def take(row: dict[str, Any], match: str) -> None:
-        payload = compact_approved_row(row, match=match)
+    def take(row: dict[str, Any], match: str, note: str = "") -> None:
+        payload = compact_approved_row(row, match=match, note=note)
         if not (payload["source_id"] and payload["question"] and payload["value"]):
             return
         used.add(payload["source_id"])
@@ -364,6 +374,14 @@ def match_approved_answers(
                 best_score = score
         if best is not None:
             take(best, "overlap")
+            continue
+        interpolated = interpolate_approved_for_question(pool, question, used)
+        if interpolated is None:
+            continue
+        source_id = str(interpolated.get("source_id") or "")
+        if source_id:
+            used.add(source_id)
+        matched.append(interpolated)
     return matched[:limit]
 
 

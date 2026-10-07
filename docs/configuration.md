@@ -36,6 +36,7 @@ Out of scope: CAPTCHA, multifactor authentication, cookie theft, and sending the
 | `OLLAMA_HOST` | Optional | Local Ollama URL. Default `http://127.0.0.1:11434` |
 | `OLLAMA_MODEL` | Optional | Default `llama3.2`. SQLite `operator_settings.ollama_model` wins when set |
 | `LINKEDIN_JOB_FIT_THRESHOLD` | Optional | Skip listings when Llama fit is below this (0-1). Default `0.55` |
+| `LINKEDIN_JOB_FIT_TIMEOUT_SEC` | Optional | Job-fit `/api/generate` timeout. Default `180`. Floored at `90` on CPU llama3.2. Form fill stays 90s |
 | `LINKEDIN_APPLICANT_SUMMARY` | Optional | Extra truthful facts for short text questions |
 
 Outputs are written under `data/` (ignored by Git): application audit log, failure screenshots, and
@@ -63,12 +64,12 @@ flowchart TD
   G -->|no Easy Apply| F
   G -->|Easy Apply| GF{Llama job fit}
   GF -->|skip| F
-  GF -->|apply or Ollama down| H[Fill phone, city, approved memory, then mapped years and Yes/No]
+  GF -->|apply or gate skipped| H[Fill phone, city, approved memory, then mapped years and Yes/No]
   H --> I[Attach resume to file inputs]
   I --> J[Ask local Llama only for remaining fields]
   J --> K{Submit, next, or still-unknown required field}
   K -->|Submit| L[Write audit log]
-  K -->|Unknown required| M[Skip job needs_review]
+  K -->|Unknown sensitive required| M[Skip job needs_review]
 ```
 
 ## Failure paths
@@ -76,11 +77,13 @@ flowchart TD
 - Missing Chrome/Firefox login source fails `--check` before a browser opens.
 - A configured resume path that does not exist fails `--check`.
 - CAPTCHA, 2FA, or a security checkpoint must be finished in the visible browser window.
-- Unknown required screening questions are not invented as essays. Approved memory
-  and mapped config fill first. A local Ollama model may fill leftover short fields
-  from facts. If a required field is still empty, that job is skipped (`needs_review`).
+- Unknown required screening questions are not invented as essays. Approved memory,
+  related interpolation, and mapped config fill first. A local Ollama model may infer
+  leftover short fields from facts (second pass for required non-sensitive omissions).
+  If a required **sensitive** field is still empty, that job is skipped (`needs_review`).
   A separate Llama job-fit gate can skip junk listings (`skipped_fit`) when Ollama is
-  ready; if Ollama is down the gate is skipped and the run continues.
+  ready; if Ollama is down, the model is missing, or generate times out (180s), the gate
+  is skipped and Easy Apply still runs.
 - LinkedIn can rate-limit or restrict automated activity. Slow down or stop if that happens.
 
 ## Security considerations
@@ -91,9 +94,11 @@ does not bypass security checks.
 
 ## Performance considerations
 
-Each keyword and location pair becomes a search URL. Keep the keyword list focused. Title, company,
-and Easy Apply filters run on the search card **before** the job page opens, so intern/staffing/unrelated
-titles never pay the job-view delay.
+Each keyword and location pair becomes a search URL. Multi-word keywords are quoted and
+`blackListTitles` are sent as Boolean `NOT` terms so LinkedIn returns fewer unrelated
+listings. Title, company, workplace, and Easy Apply filters then run on the search card
+**before** the job page opens. The apply loop opens only those matching cards; rejected
+cards use a short list-scan delay instead of the 10-22 second job-view wait.
 
 ## Firefox profile
 
@@ -106,8 +111,10 @@ Prefer `FIREFOX_PROFILE_PATH` over storing `LINKEDIN_EMAIL` and `LINKEDIN_PASSWO
 
 ## Human pacing
 
-Default `LINKEDIN_PACE=human` waits 10-22 seconds on a job, types contact fields key by key, waits
-18-40 seconds after a successful apply, and pauses longer every 7 jobs. The assistant also stops at
+Default `LINKEDIN_PACE=human` waits 10-22 seconds on an opened job, 0.2-0.5 seconds while
+scanning each search card, types contact fields key by key, waits 18-40 seconds after a
+successful apply, and pauses longer every 7 jobs. Rejected search cards are not opened
+and do not use the 3.5-8 second skip delay. The assistant also stops at
 12 successful applies per run and 25 per **local** calendar day. These caps reduce restriction risk; they do not make
 automated use safe.
 

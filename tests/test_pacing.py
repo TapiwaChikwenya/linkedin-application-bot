@@ -27,6 +27,13 @@ def test_sleep_human_uses_injected_clock():
     assert sleeps == [0.5]
 
 
+def test_list_scan_is_much_faster_than_job_skip():
+    _scan_low, scan_high = delay_range("human", "list_scan")
+    skip_low, _skip_high = delay_range("human", "skip")
+    assert scan_high <= 0.5
+    assert scan_high < skip_low
+
+
 def test_long_break_every_seven_jobs():
     assert should_take_long_break(0) is False
     assert should_take_long_break(7) is True

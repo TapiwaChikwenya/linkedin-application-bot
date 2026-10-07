@@ -488,7 +488,7 @@
       <a href="/" class="{% if nav == '/' %}active{% endif %}">Live</a>
       <a href="/applications" class="{% if nav.startswith('/applications') %}active{% endif %}">Applications</a>
       <a href="/questions" class="{% if nav.startswith('/questions') %}active{% endif %}">Questions</a>
-      <a href="/models" class="{% if nav.startswith('/models') or nav.startswith('/settings') %}active{% endif %}">Settings</a>
+      <a href="/models" id="settingsNav" class="{% if nav.startswith('/models') or nav.startswith('/settings') %}active{% endif %}">Settings</a>
       <a href="/diagnostics" class="{% if nav.startswith('/diagnostics') %}active{% endif %}">Diagnostics</a>
     </nav>
     <div class="err" id="errorBar"></div>
@@ -811,7 +811,11 @@
       const fit = data.last_fit || {};
       const fitEl = document.getElementById("fitState");
       if (fitEl) {
-        if (fit.score != null || fit.decision || fit.line) {
+        if (fit.error_kind) {
+          fitEl.textContent = fit.error_kind;
+          fitEl.className = "warn";
+          fitEl.title = fit.line || fit.reason || "";
+        } else if (fit.score != null || fit.decision || fit.line) {
           const score = fit.score != null && Number.isFinite(Number(fit.score))
             ? Number(fit.score).toFixed(2)
             : "—";

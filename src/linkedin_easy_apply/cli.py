@@ -108,6 +108,14 @@ def _print_startup_banner() -> None:
     print("Local LLM: " + str(info.get("model") or "") + " — " + str(info.get("detail") or ""))
 
 
+def _prepare_local_llm() -> None:
+    """Probe /api/tags and optionally warm llama so the first job-fit is not a 30s ingest."""
+    from linkedin_easy_apply.llm import warmup_ollama
+
+    result = warmup_ollama()
+    print(str(result.get("detail") or "Ollama warmup: skipped"))
+
+
 def _prepare_firefox_profile() -> int:
     import config
     from linkedin_easy_apply.runtime import wait_for_unlocked_profile
@@ -192,9 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         from linkedin_easy_apply.dashboard.app import run_dashboard
 
         return run_dashboard()
-    from linkedin_easy_apply.operator_settings import apply_operator_overrides
-
     import config as config_module
+    from linkedin_easy_apply.operator_settings import apply_operator_overrides
 
     apply_operator_overrides(config_module)
     errors = validate_configuration()
@@ -217,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     # Claim the long-lived interpreter PID before importing selenium/linkedin.py.
     with worker_process_lease():
         _print_startup_banner()
+        _prepare_local_llm()
         profile_status = _prepare_firefox_profile()
         if profile_status:
             return profile_status

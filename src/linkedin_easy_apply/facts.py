@@ -103,7 +103,6 @@ def applicant_facts(
 ) -> dict[str, Any]:
     """Structured, local-only facts sent to Ollama with a form snapshot."""
     import config as default_config
-
     from linkedin_easy_apply.operator_settings import (
         resolved_applicant_summary,
         resolved_resume_path,

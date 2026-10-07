@@ -22,26 +22,31 @@ flowchart TD
   C -->|no| F
   F --> G[Ollama serve plus pull llama3.2]
   G --> H[Worker python -m linkedin_easy_apply]
-  H --> I[Search cards skip-before-open]
-  I --> J{Title company Easy Apply already applied}
-  J -->|skip| I
-  J -->|match| K[Llama job-fit gate]
-  K -->|skipped_fit| I
-  K -->|apply or Ollama down| L[Closed-shadow Easy Apply pierce]
-  L --> M[Approved RAG then config maps then Llama leftovers]
-  M --> N[SQLite jobs questions metrics]
-  N --> B
+  H --> I[Quoted keyword search plus NOT title exclusions]
+  I --> J[Scan cards; keep matches only]
+  J --> K{Title company workplace Easy Apply already applied}
+  K -->|skip| J
+  K -->|match| L[Llama job-fit gate]
+  L -->|skipped_fit| J
+  L -->|apply or Ollama down| M[Closed-shadow Easy Apply pierce]
+  M --> N[Approved RAG then config maps then Llama leftovers]
+  N --> O[SQLite jobs questions metrics]
+  O --> B
 ```
 
 During Easy Apply, known contact fields and the local resume file (if configured)
 are filled, then operator-approved SQLite answers, then specific config Yes/No and
 years-of-experience bootstrap maps, then a local Ollama model for leftovers. Title
-and company allow/deny lists skip mismatched search cards before the job page
-opens. After those filters, a local Llama **job-fit gate** scores the search-card snippet (or
+and company allow/deny lists, plus workplace vs `config.remote`, skip mismatched
+search cards before the job page opens. Search URLs quote keyword phrases and append
+`NOT` title-blacklist terms so LinkedIn returns fewer junk listings. After those
+filters, a local Llama **job-fit gate** scores the search-card snippet (or
 the job description if the snippet is short) and skips junk (`skipped_fit`) when
 fit is below 0.55 or the model says skip. Ollama being down skips the gate, not
-the run. Required fields that still have no grounded answer skip that job as
-`needs_review`. The current LinkedIn SDUI modal lives in a closed shadow root on
+the run. Required **sensitive** fields that still have no grounded answer skip
+that job as `needs_review`. Required non-sensitive leftovers are inferred or
+interpolated from resume facts, related skill years, and approved answers.
+The current LinkedIn SDUI modal lives in a closed shadow root on
 `#interop-outlet[data-testid='interop-shadowdom']`. The worker pierces that tree with Selenium
 `element.shadow_root` (JavaScript `el.shadowRoot` is null for closed roots), then walks nested closed
 shadows for the dialog, footer Next/Review/Submit, and combobox fields. Job-page carousel

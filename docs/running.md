@@ -52,11 +52,11 @@ flowchart TD
   I --> J{Firefox profile locked?}
   J -->|yes| K[409: close Firefox then Start again]
   J -->|no| L[Open Firefox with the bot profile]
-  L --> L1[Load search URL from keywords/location]
-  L1 --> L2[Read each search card in the list]
-  L2 --> L3{Card title/company/Easy Apply/store}
+  L --> L1[Load search URL with quoted keywords and NOT title exclusions]
+  L1 --> L2[Scan search cards with list_scan pacing]
+  L2 --> L3{Title company workplace Easy Apply store}
   L3 -->|skip| L2
-  L3 -->|match| M[Open matching job page]
+  L3 -->|match| M[Open only matching job pages]
   M --> N{Job page ready?}
   N -->|no title and no Easy Apply| M
   N -->|Easy Apply visible| O[Traverse semantic dialog and open shadow roots]
@@ -152,42 +152,107 @@ Monday=0. `00:00`–`23:59` is treated as all day. `start == end` disables that
 window. Overnight windows wrap midnight. A closed window stops the **owned
 worker tree only**.
 
-## Search-card skip before open
+## Match-first search URLs
 
 ### Feature purpose
 
-Stop the worker from opening LinkedIn job pages that already fail the operator's title, company,
-Easy Apply, or already-applied rules. The search list has enough light-DOM metadata to reject
-Staffing, Intern, off-site, blank, and previously applied cards without a full page load.
+Ask LinkedIn for the jobs the operator actually wants before the worker walks a result
+page. Unquoted keywords match scattered tokens in titles **and** descriptions, so a
+`Data Engineer` search fills the list with unrelated Engineer roles. The URL builder now
+sends a quoted phrase plus Boolean `NOT` terms from `blackListTitles`, so fewer junk
+cards ever appear.
 
 ### Scope
 
-In scope: reading title, company, and Easy Apply / SDUI apply signals from each
-`li[data-occludable-job-id]` card; aria-label and `job-card-container` fallbacks; SQLite
-already-applied checks; logging `Skipped before open: …` on the card.
-
-Out of scope: changing `config.keywords` / `config.location` search URL generation, dashboard
-redesign, and application caps.
+In scope: `utils.search_keyword_query` and `LinkedinUrlGenerate.generateUrlLinks`.
+Out of scope: dashboard editing of keywords, LinkedIn job-title ID (`f_T`) filters.
 
 ### Inputs and outputs
 
 | Input | Purpose |
 |---|---|
-| Search-result card light DOM | Title, company, Easy Apply badge, Applied state, SDUI `openSDUIApplyFlow` href |
+| `config.keywords` | Positive phrase, quoted when it contains spaces |
+| `config.blackListTitles` | Boolean `NOT intern`, `NOT "entry level"`, … |
+| Existing `f_AL`, location, experience, remote, salary, date, sort | Unchanged LinkedIn facets |
+
+Output: `data/urlData.txt` URLs such as
+`keywords=%22Data%20Engineer%22%20NOT%20intern`. Operator logs still show the positive
+phrase via `urlToKeywords`.
+
+### Dependencies
+
+- LinkedIn job search Boolean operators (`"` and `NOT`)
+- `config.py` search policy
+
+### Functional flow
+
+```mermaid
+flowchart TD
+  A[config.keywords x location] --> B[Quote multi-word phrase]
+  B --> C[Append NOT blackListTitles]
+  C --> D[Add Easy Apply remote salary date facets]
+  D --> E[Search page]
+  E --> F[Card match filter]
+  F --> G[Open only matching jobs]
+```
+
+### Failure paths
+
+- LinkedIn applies `NOT` to the whole posting, not only the title. A Data Engineer role
+  whose description mentions an intern program can disappear. Remove that token from
+  `blackListTitles` if recall drops too far.
+- A blacklist token that is part of the keyword itself (searching `Junior Data Engineer`
+  with `junior` blocked) is not appended, so the URL does not cancel itself.
+- If LinkedIn ignores Boolean in `keywords=`, card-side filters still reject junk.
+
+### Security considerations
+
+Search URLs contain only public job-search policy. No cookies or credentials.
+
+### Performance considerations
+
+Phrase + `NOT` cuts result volume at LinkedIn, so the worker paginates fewer 25-card
+pages (each page still waits 6-12s to load). This is the cheapest filter: no job-view
+delay and no Llama call.
+
+## Search-card skip before open
+
+### Feature purpose
+
+Stop the worker from opening LinkedIn job pages that already fail the operator's title,
+company, workplace, Easy Apply, or already-applied rules. After the list is scanned, the
+apply loop iterates **only** matching cards.
+
+### Scope
+
+In scope: reading title, company, location, and Easy Apply / SDUI apply signals from each
+`li[data-occludable-job-id]` card; aria-label and `job-card-container` fallbacks; SQLite
+already-applied checks; workplace vs `config.remote`; logging `Skipped before open: …`
+on the card; `list_scan` pacing while reading the list.
+
+Out of scope: dashboard redesign and application caps.
+
+### Inputs and outputs
+
+| Input | Purpose |
+|---|---|
+| Search-result card light DOM | Title, company, location, Easy Apply badge, Applied state, SDUI `openSDUIApplyFlow` href |
 | `config.onlyApplyTitles` / `blackListTitles` | List-side title allow/deny |
 | `config.blacklist` / `onlyApply` | List-side company allow/deny |
-| `config.keywords` / `location` | Search URL filters only; they do not open junk titles |
+| `config.remote` | Skip On-site cards when only Remote/Hybrid are allowed |
 | SQLite `jobs` | Skip ids whose status is `applied` or `already_applied` |
 
-Outputs: audit lines `Skipped before open: <reason>. Job: <url>`, SQLite statuses
-`skipped_filter`, `already_applied`, or `failed` (no Easy Apply / off-site). Matching Easy Apply
-cards are the only ones that call `driver.get` on `/jobs/view/{id}`.
+Outputs: audit lines `Skipped before open: <reason>. Job: <url>`, a page summary
+`opening N matching job(s) out of M cards`, SQLite statuses `skipped_filter`,
+`already_applied`, or `failed` (no Easy Apply / off-site). Matching Easy Apply cards
+are the only ones that call `driver.get` on `/jobs/view/{id}`.
 
 ### Dependencies
 
 - Search results still use the URLs from `utils.LinkedinUrlGenerate`
 - `linkedin_easy_apply.job_card` parses sanitized card HTML
 - `Store.get_job` for prior applies
+- `linkedin_easy_apply.pacing` `list_scan` vs `skip` / `job_view`
 
 ### Functional flow
 
@@ -196,7 +261,7 @@ flowchart TD
   A[Search results page] --> B[Scroll card into view]
   B --> C{Job id already applied in store?}
   C -->|yes| S[Log skip on card]
-  C -->|no| D[Read title/company/Easy Apply from card HTML]
+  C -->|no| D[Read title/company/location/Easy Apply from card HTML]
   D --> E{Metadata empty?}
   E -->|yes| F[aria-label and job-card-container attributes]
   F --> G{Still no title?}
@@ -204,10 +269,13 @@ flowchart TD
   E -->|no| H{Title/company filter?}
   G -->|no| H
   H -->|fail| S
-  H -->|pass| I{Easy Apply or SDUI apply on card?}
+  H -->|pass| W{Workplace allowed?}
+  W -->|no| S
+  W -->|yes| I{Easy Apply or SDUI apply on card?}
   I -->|no| S
-  I -->|yes| J[Open /jobs/view/id]
+  I -->|yes| P[Collect matching cards]
   S --> A
+  P --> J[Open /jobs/view/id for matches only]
 ```
 
 ### Failure paths
@@ -216,6 +284,8 @@ flowchart TD
   is skipped as unknown. The worker does not open it to discover that it is junk.
 - Title blacklist (`intern`, `staffing`, …) and `onlyApplyTitles` run on the card text, so a
   Data Engineer search does not open Intern or Warehouse titles.
+- Location text that is explicitly On-site is skipped when `config.remote` is Remote/Hybrid.
+  Cards with no workplace remain eligible until the job page says otherwise.
 - Missing Easy Apply on the card is a skip, including "Apply on company website".
 - Caps are unchanged: skipped cards do not count as successful applies.
 
@@ -226,6 +296,8 @@ written to the audit line beyond the canonical `/jobs/view/{id}` URL.
 
 ### Performance considerations
 
-A skip-before-open avoids the 10-22 second job-view delay and the job-page DOM wait. The list
-still uses human skip pacing so a page of junk cards is not clicked through at machine speed.
+Rejected cards use `list_scan` (0.2-0.5s) instead of `skip` (3.5-8s) or `job_view`
+(10-22s). A page of 20 mismatches used to wait more than a minute of skip delays before
+opening the two real matches; it now scans the list and opens only those two. Human
+`skip` pacing still applies after a job page has been opened and then abandoned.
 

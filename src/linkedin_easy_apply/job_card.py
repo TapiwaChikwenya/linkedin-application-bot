@@ -14,10 +14,15 @@ APPLY_KIND_EXTERNAL = "external"
 APPLY_KIND_MISSING = "missing"
 
 SKIP_TITLE_FILTER = "Skipped by title/company filter"
+SKIP_WORKPLACE = "Skipped by workplace filter"
 SKIP_ALREADY_APPLIED = "Already applied"
 SKIP_NO_EASY_APPLY = "No Easy Apply on search card"
 SKIP_EXTERNAL = "Off-site apply, not Easy Apply"
 SKIP_UNKNOWN_CARD = "Search card title missing; skipped without opening"
+
+_ON_SITE = re.compile(r"\bon[\s-]?site\b", re.IGNORECASE)
+_REMOTE_WORK = re.compile(r"\bremote\b", re.IGNORECASE)
+_HYBRID_WORK = re.compile(r"\bhybrid\b", re.IGNORECASE)
 
 TITLE_CLASS_HINTS = (
     "job-card-list__title",
@@ -172,6 +177,46 @@ def should_skip_job(title: str, company: str) -> bool:
     return bool(only_titles) and not any(item.lower() in title_l for item in only_titles)
 
 
+def allowed_workplaces() -> set[str]:
+    allowed: set[str] = set()
+    for item in getattr(config, "remote", []) or []:
+        key = " ".join(str(item or "").lower().replace("_", " ").split())
+        if key in {"on-site", "onsite", "on site"}:
+            allowed.add("on-site")
+        elif key == "remote":
+            allowed.add("remote")
+        elif key == "hybrid":
+            allowed.add("hybrid")
+    return allowed
+
+
+def workplace_kind(*parts: str) -> str:
+    blob = " ".join(part for part in parts if part)
+    if not blob.strip():
+        return ""
+    on_site = bool(_ON_SITE.search(blob))
+    remote = bool(_REMOTE_WORK.search(blob))
+    hybrid = bool(_HYBRID_WORK.search(blob))
+    if hybrid:
+        return "hybrid"
+    if remote:
+        return "remote"
+    if on_site:
+        return "on-site"
+    return ""
+
+
+def should_skip_workplace(*parts: str) -> bool:
+    """Skip listings whose workplace is present and outside config.remote."""
+    allowed = allowed_workplaces()
+    if not allowed:
+        return False
+    kind = workplace_kind(*parts)
+    if not kind:
+        return False
+    return kind not in allowed
+
+
 def card_skip_decision(
     card: SearchCard,
     *,
@@ -186,6 +231,8 @@ def card_skip_decision(
         return "skipped_filter", SKIP_UNKNOWN_CARD
     if should_skip_job(card.title, card.company):
         return "skipped_filter", SKIP_TITLE_FILTER
+    if should_skip_workplace(card.location):
+        return "skipped_filter", SKIP_WORKPLACE
     if card.apply_kind == APPLY_KIND_EXTERNAL:
         return "failed", SKIP_EXTERNAL
     if card.apply_kind != APPLY_KIND_EASY:

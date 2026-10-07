@@ -32,6 +32,7 @@ from linkedin_easy_apply.job_card import (
     normalize_job_id,
     parse_search_card,
     should_skip_job,
+    should_skip_workplace,
 )
 from linkedin_easy_apply.job_fit import snippet_is_usable
 from linkedin_easy_apply.modal_detection import (
@@ -222,14 +223,16 @@ class Linkedin:
                 offersPerPage = self.driver.find_elements(By.XPATH,'//li[@data-occludable-job-id]')
 
                 cards_to_open = []
+                skipped_cards = 0
                 for offer in offersPerPage:
                     if remaining_applications(countApplied, run_cap, day_cap, store=self.store) <= 0:
                         prYellow("Reached the application cap. Stopping to protect the account.")
                         return
                     card, skip = self.inspect_search_card(offer)
+                    sleep_human(self.pace(), "list_scan")
                     if skip:
                         self.record_card_skip(card, skip)
-                        sleep_human(self.pace(), "skip")
+                        skipped_cards += 1
                         continue
                     if snippet_is_usable(getattr(card, "snippet", "") or ""):
                         offer_page = "https://www.linkedin.com/jobs/view/" + str(card.job_id)
@@ -245,13 +248,17 @@ class Linkedin:
                             ),
                         }
                         if self.apply_fit_gate(card_details, card.job_id, offer_page, card=card):
-                            sleep_human(self.pace(), "skip")
+                            skipped_cards += 1
                             continue
                         passed = getattr(self, "_card_fit_passed", None)
                         if passed is None:
                             self._card_fit_passed = set()
                         self._card_fit_passed.add(str(card.job_id))
                     cards_to_open.append(card)
+
+                self.log_page_matches(page, len(offersPerPage), len(cards_to_open), skipped_cards)
+                if not cards_to_open:
+                    continue
 
                 for card in cards_to_open:
                     if remaining_applications(countApplied, run_cap, day_cap, store=self.store) <= 0:
@@ -295,10 +302,21 @@ class Linkedin:
                             sleep_human(self.pace(), "skip")
                             continue
 
-                        if self.shouldSkipJob(jobTitle, jobCompany):
+                        if self.job_identity_changed(card, jobTitle, jobCompany) and self.shouldSkipJob(jobTitle, jobCompany):
                             lineToWrite = jobProperties + " | * Skipped by title/company filter. Job: " + str(offerPage)
                             self.displayWriteResults(lineToWrite)
                             self.record_job(offerPage, "skipped_filter", "Skipped by title/company filter", details)
+                            sleep_human(self.pace(), "skip")
+                            continue
+
+                        if should_skip_workplace(
+                            details.get("workplace") or "",
+                            details.get("location") or "",
+                            getattr(card, "location", "") or "",
+                        ):
+                            lineToWrite = jobProperties + " | * Skipped by workplace filter. Job: " + str(offerPage)
+                            self.displayWriteResults(lineToWrite)
+                            self.record_job(offerPage, "skipped_filter", "Skipped by workplace filter", details)
                             sleep_human(self.pace(), "skip")
                             continue
 
@@ -482,6 +500,25 @@ class Linkedin:
     def shouldSkipJob(title: str, company: str) -> bool:
         """Honor config allow/deny lists. Empty entries are ignored."""
         return should_skip_job(title, company)
+
+    @staticmethod
+    def job_identity_changed(card: SearchCard, title: str, company: str) -> bool:
+        """True when the job page title/company differs from the already-filtered card."""
+        page_title = (title or "").strip().lower()
+        page_company = (company or "").strip().lower()
+        card_title = (getattr(card, "title", "") or "").strip().lower()
+        card_company = (getattr(card, "company", "") or "").strip().lower()
+        if page_title and page_title != card_title:
+            return True
+        return bool(page_company and page_company != card_company)
+
+    def log_page_matches(self, page: int, total: int, matched: int, skipped: int) -> None:
+        line = (
+            f"Search page {page + 1}: opening {matched} matching job(s) "
+            f"out of {total} cards ({skipped} filtered before open)."
+        )
+        prYellow(line)
+        self.displayWriteResults("\n " + line)
 
     def stored_job(self, job_id: str) -> dict | None:
         store = getattr(self, "store", None)
@@ -1554,7 +1591,7 @@ class Linkedin:
         if not callable(retrieve):
             return "", ""
         try:
-            matches = retrieve([{"question": question}], limit=1) or []
+            matches = retrieve([{"question": question, "kind": field.get("kind") or ""}], limit=1) or []
         except (OSError, TypeError, ValueError):
             return "", ""
         if not matches:
@@ -1564,6 +1601,11 @@ class Linkedin:
         source_id = str(item.get("source_id") or "")
         if not value:
             return "", ""
+        note = str(item.get("note") or "").strip()
+        if note:
+            field["_inference_note"] = note
+        elif str(item.get("match") or "") == "interpolated":
+            field["_inference_note"] = "Inferred from related approved answer"
         kind = str(field.get("kind") or "").lower()
         options = [str(option) for option in field.get("options") or [] if str(option).strip()]
         if kind in {"select", "radio"} and options:
@@ -1577,6 +1619,7 @@ class Linkedin:
 
     def mapped_value_for_field(self, field: dict) -> str:
         from linkedin_easy_apply.facts import mapped_years_experience
+        from linkedin_easy_apply.inference import skill_years_for_question
 
         question = str(field.get("question") or "")
         kind = str(field.get("kind") or "")
@@ -1585,14 +1628,12 @@ class Linkedin:
             return str(getattr(config, "phone_number", "") or "")
         if "city" in question_l or "location" in question_l:
             return str(getattr(config, "application_city", "") or "")
-        if "year" in question_l and "experience" in question_l:
-            answers = mapped_years_experience(getattr(config, "years_experience", {}) or {})
-            value = ""
-            for skill, years in answers.items():
-                if skill.lower() in question_l:
-                    value = years
-                    break
-            return "" if value in {"", None} else str(value)
+        years_map = mapped_years_experience(getattr(config, "years_experience", {}) or {})
+        inferred = skill_years_for_question(question, years_map, kind=kind)
+        if inferred is not None:
+            if inferred.note:
+                field["_inference_note"] = inferred.note
+            return inferred.value
         if kind in {"radio", "select", "checkbox"}:
             return self.yesNoAnswerForQuestion(question) or ""
         return self.yesNoAnswerForQuestion(question) or ""
@@ -1697,6 +1738,10 @@ class Linkedin:
                     pending.pop(target_index)
                 applied_count += 1
                 source_ids = list(item.get("source_ids") or [])
+                if item.get("inferred"):
+                    from linkedin_easy_apply.inference import log_question_label
+
+                    self.observe("Inferred: " + log_question_label(question), job_id)
                 self.remember_session_answer({
                     "question": question,
                     "value": item.get("value") or "",
@@ -1775,6 +1820,7 @@ class Linkedin:
                 approved_count += 1
                 if str(field.get("kind") or "") in {"radio", "checkbox"}:
                     field["checked"] = str(approved).lower() in {"yes", "true", "1", "on"}
+                self._log_inference_notes(field, job_id)
                 self.remember_session_answer({
                     "question": str(field.get("question") or ""),
                     "value": approved,
@@ -1790,6 +1836,7 @@ class Linkedin:
                 mapped_count += 1
                 if str(field.get("kind") or "") in {"radio", "checkbox"}:
                     field["checked"] = str(mapped).lower() in {"yes", "true", "1", "on"}
+                self._log_inference_notes(field, job_id)
                 self.remember_session_answer({
                     "question": str(field.get("question") or ""),
                     "value": mapped,
@@ -1800,6 +1847,7 @@ class Linkedin:
         self.observe("Approved memory applied: " + str(approved_count), job_id)
         self.observe("Mapped answers applied: " + str(mapped_count), job_id)
         self.fill_llm_fields(fields, snapshot, job_id)
+        self.fill_conservative_inferences(fields, job_id)
         from linkedin_easy_apply.question_capture import append_questions, remember_questions
 
         details = getattr(self, "current_job_details", {}) or {}
@@ -1824,8 +1872,51 @@ class Linkedin:
 
         skip_reason = unanswered_required_reason(fields)
         if skip_reason:
+            self.observe("Skipped sensitive unanswered", job_id, "warning")
             self.observe(skip_reason, job_id, "warning")
         return skip_reason
+
+    def _log_inference_notes(self, field: dict, job_id: object | None = None) -> None:
+        from linkedin_easy_apply.inference import log_question_label
+
+        note = str(field.get("_inference_note") or "").strip()
+        if not note:
+            return
+        self.observe(note, job_id)
+        label = log_question_label(str(field.get("question") or ""))
+        if label and not note.casefold().startswith("inferred:"):
+            self.observe("Inferred: " + label, job_id)
+
+    def fill_conservative_inferences(self, fields: list, job_id: object | None = None) -> None:
+        from linkedin_easy_apply.facts import mapped_years_experience
+        from linkedin_easy_apply.inference import conservative_inferred_value
+
+        years = mapped_years_experience(getattr(config, "years_experience", {}) or {})
+        for field in fields:
+            if field.get("_answered") or str(field.get("kind") or "") == "file":
+                continue
+            if not field.get("required"):
+                continue
+            inferred = conservative_inferred_value(field, years)
+            if inferred is None or not inferred.value:
+                continue
+            if inferred.note:
+                field["_inference_note"] = inferred.note
+            if not self.fill_control(field, inferred.value):
+                continue
+            field["_answered"] = True
+            field["_mapped_value_present"] = True
+            field["value"] = inferred.value
+            if str(field.get("kind") or "") in {"radio", "checkbox"}:
+                field["checked"] = str(inferred.value).lower() in {"yes", "true", "1", "on"}
+            self._log_inference_notes(field, job_id)
+            self.remember_session_answer({
+                "question": str(field.get("question") or ""),
+                "value": inferred.value,
+                "source": "mapped",
+                "mapped": True,
+                "field_kind": str(field.get("kind") or ""),
+            })
 
     @staticmethod
     def isResumeUploadField(metadata: str, element_id: str = "", element_name: str = "") -> bool:

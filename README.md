@@ -117,13 +117,26 @@ The entire directory is ignored by Git because these files can contain personal 
 
 ## Development
 
+The default **regression gate** for any new feature is:
+
 ```powershell
-python -m pytest
+python -m pytest tests -q
+```
+
+That is also `addopts = "-q"` plus `testpaths = ["tests"]` in `pyproject.toml`. Run it
+before considering a feature done. It uses TestClient and mocks; it does **not** start
+the LinkedIn worker and does **not** `ollama pull` large models.
+
+```powershell
+.\scripts\test-regression.ps1
 python -m ruff check src tests
 python -m build
 ```
 
-CI runs these checks on Python 3.10, 3.11, and 3.12. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+`scripts/test-regression.ps1` runs `pytest tests -q` then Ruff. GitHub Actions
+(`.github/workflows/ci.yml`) runs the same pytest command on Python 3.10–3.12.
+Settings/Ollama picker/resume coverage lives in `tests/test_models_settings.py`
+(plus dashboard/store/question tests). See [CONTRIBUTING.md](CONTRIBUTING.md) and
 [SECURITY.md](SECURITY.md) before opening a pull request.
 
 ## Project layout
@@ -135,7 +148,8 @@ CI runs these checks on Python 3.10, 3.11, and 3.12. See [CONTRIBUTING.md](CONTR
 ├── Start-Bot.cmd             # optional fallback: worker without the dashboard
 ├── Login-LinkedIn.cmd        # optional fallback: same as dashboard Login
 ├── src/linkedin_easy_apply/  # installable CLI package
-├── tests/                    # offline unit tests
+├── tests/                    # offline unit tests (pytest tests -q)
+├── scripts/test-regression.ps1  # local regression gate wrapper
 ├── docs/                     # operator documentation
 ├── .github/workflows/        # continuous integration
 ├── linkedin.py               # browser workflow and compatibility entry point

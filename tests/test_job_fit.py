@@ -1,14 +1,18 @@
 from linkedin_easy_apply.job_fit import (
     FIT_RESPONSE_FORMAT,
+    FIT_TIMEOUT_MIN_SEC,
+    FIT_TIMEOUT_SEC,
     JobFitResult,
     build_fit_prompt,
     compact_fit_profile,
     evaluate_listing_fit,
+    job_fit_timeout_sec,
     last_fit_status,
     normalize_fit_payload,
     parse_fit_log,
     snippet_is_usable,
 )
+from linkedin_easy_apply.llm import GenerateJsonResult
 from linkedin_easy_apply.page_snapshot import unanswered_required_reason
 
 LONG_SNIPPET = (
@@ -59,9 +63,10 @@ def test_invalid_payload_does_not_skip_job():
 def test_evaluate_listing_fit_prefers_card_and_logs_apply():
     captured = {}
 
-    def fake_generate(prompt, response_format, **_kwargs):
+    def fake_generate(prompt, response_format, **kwargs):
         captured["prompt"] = prompt
         captured["format"] = response_format
+        captured["timeout"] = kwargs.get("timeout")
         return {"fit": 0.82, "reason": "keyword match", "decision": "apply"}
 
     result = evaluate_listing_fit(
@@ -75,6 +80,9 @@ def test_evaluate_listing_fit_prefers_card_and_logs_apply():
     assert result.source == "card"
     assert result.log_line() == "Job fit llama=0.82 apply"
     assert captured["format"] == FIT_RESPONSE_FORMAT
+    assert captured["timeout"] == FIT_TIMEOUT_SEC
+    assert FIT_TIMEOUT_SEC >= 180
+    assert FIT_TIMEOUT_MIN_SEC >= 90
     assert "Do not invent" in captured["prompt"]
     assert "Senior Data Engineer" in captured["prompt"]
 
@@ -125,7 +133,66 @@ def test_ollama_down_does_not_skip_or_block():
     )
     assert result.ready is False
     assert result.skip_job is False
-    assert "Ollama not ready" in result.log_line()
+    assert result.log_line() == "Job fit llama skipped: Ollama not ready"
+
+
+def test_fit_skip_message_mapping():
+    cases = (
+        ("timeout", "generate timeout (180s)"),
+        ("unreachable", "Ollama not reachable"),
+        ("missing_model", "model missing"),
+        ("disabled", "Ollama not ready"),
+        ("not_ready", "Ollama not ready"),
+    )
+    for kind, detail in cases:
+        result = evaluate_listing_fit(
+            title="Data Engineer",
+            company="Acme",
+            snippet=LONG_SNIPPET,
+            source="description",
+            generate_json=lambda *_args, kind=kind, detail=detail, **_kwargs: GenerateJsonResult(
+                payload={},
+                error_kind=kind,
+                error=detail,
+                timeout_sec=FIT_TIMEOUT_SEC,
+            ),
+        )
+        assert result.ready is False
+        assert result.skip_job is False
+        assert result.log_line() == "Job fit llama skipped: " + detail
+        if kind == "timeout":
+            assert "not ready" not in result.log_line()
+
+
+def test_fit_timeout_retries_shorter_prompt_then_applies():
+    prompts = []
+
+    def fake_generate(prompt, response_format, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return GenerateJsonResult(
+                payload={},
+                error_kind="timeout",
+                error="generate timeout (180s)",
+                timeout_sec=FIT_TIMEOUT_SEC,
+            )
+        return {"fit": 0.8, "reason": "keyword match", "decision": "apply"}
+
+    result = evaluate_listing_fit(
+        title="Data Engineer",
+        company="Acme",
+        snippet=LONG_SNIPPET,
+        source="description",
+        generate_json=fake_generate,
+    )
+    assert result.skip_job is False
+    assert result.ready is True
+    assert result.log_line() == "Job fit llama=0.80 apply"
+    assert len(prompts) == 2
+    assert "applicant_profile" in prompts[0]
+    assert "title and snippet only" in prompts[1]
+    assert "applicant_profile" not in prompts[1]
+    assert "approved_facts" not in prompts[1]
 
 
 def test_build_fit_prompt_is_grounded_in_keywords_only(monkeypatch, tmp_path):
@@ -149,6 +216,10 @@ def test_build_fit_prompt_is_grounded_in_keywords_only(monkeypatch, tmp_path):
     assert "Do not invent" in prompt
     assert "resume_text" not in prompt
     assert "How many years of SQL experience?" in prompt
+    compact = build_fit_prompt("Data Engineer", "Acme", LONG_SNIPPET, profile, compact=True)
+    assert "title and snippet only" in compact
+    assert "applicant_profile" not in compact
+    assert "approved_facts" not in compact
     store.close()
 
 
@@ -164,15 +235,95 @@ def test_parse_fit_log_and_last_fit_status():
     assert from_job["score"] == 0.21
 
 
+def test_job_fit_timeout_sec_defaults_180_floors_at_90(monkeypatch):
+    monkeypatch.delenv("LINKEDIN_JOB_FIT_TIMEOUT_SEC", raising=False)
+
+    class Empty:
+        pass
+
+    assert job_fit_timeout_sec(Empty) == FIT_TIMEOUT_SEC
+    assert FIT_TIMEOUT_SEC >= 180
+    class Low:
+        job_fit_timeout_sec = 25
+    assert job_fit_timeout_sec(Low) == FIT_TIMEOUT_MIN_SEC
+    class High:
+        job_fit_timeout_sec = 240
+    assert job_fit_timeout_sec(High) == 240
+
+
+def test_timeout_while_ready_does_not_log_ollama_not_ready(monkeypatch):
+    import json
+
+    from linkedin_easy_apply import llm
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if str(url).endswith("/api/tags"):
+            return FakeResponse({"models": [{"name": "unit-model:latest"}]})
+        raise TimeoutError("timed out")
+
+    class Cfg:
+        llm_mode = "ollama"
+        ollama_host = "http://unit-ollama:11434"
+        ollama_model = "unit-model"
+        job_fit_timeout_sec = FIT_TIMEOUT_SEC
+
+    llm._STATUS_CACHE.clear()
+    monkeypatch.setattr("linkedin_easy_apply.llm.urllib.request.urlopen", fake_urlopen)
+    result = evaluate_listing_fit(
+        title="Data Engineer",
+        company="Acme",
+        snippet=LONG_SNIPPET,
+        source="description",
+        config_module=Cfg,
+    )
+    assert result.ready is False
+    assert result.skip_job is False
+    assert result.error_kind == "timeout"
+    assert result.log_line() == "Job fit llama skipped: generate timeout (180s)"
+    assert "not ready" not in result.log_line().lower()
+
+
+def test_last_fit_status_timeout_error_class():
+    timeout_line = "Job fit llama skipped: generate timeout (180s)"
+    parsed = parse_fit_log(timeout_line)
+    assert parsed["error_kind"] == "timeout"
+    assert "not ready" not in parsed["line"].lower()
+    events = [{"message": timeout_line, "job_id": "9"}]
+    status = last_fit_status(events, None)
+    assert status["error_kind"] == "timeout"
+    assert status["reason"] == "generate timeout (180s)"
+    unreachable = last_fit_status(
+        [{"message": "Job fit llama skipped: Ollama not reachable", "job_id": "8"}],
+        None,
+    )
+    assert unreachable["error_kind"] == "unreachable"
+
+
 def test_unanswered_required_reason_skips_guessing():
     reason = unanswered_required_reason([
         {"question": "Phone", "kind": "tel", "value": "555", "required": True},
         {"question": "Favorite color?", "kind": "text", "value": "", "required": True},
+        {"question": "Will you require sponsorship?", "kind": "select", "value": "", "required": True},
         {"question": "Resume", "kind": "file", "value": "", "required": True},
     ])
-    assert reason == "Unanswered required question: Favorite color?"
+    assert reason == "Unanswered required question: Will you require sponsorship?"
     assert unanswered_required_reason([
         {"question": "Phone", "kind": "tel", "value": "555", "required": True},
+        {"question": "Favorite color?", "kind": "text", "value": "", "required": True},
     ]) == ""
 
 

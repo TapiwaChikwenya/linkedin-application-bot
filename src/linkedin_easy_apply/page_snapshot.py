@@ -153,13 +153,20 @@ def unanswered_required_fields(fields: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def unanswered_required_reason(fields: list[dict[str, Any]] | None) -> str:
-    """Skip the job when a required field still has no approved, mapped, or LLM answer."""
+    """Skip the job when a required *sensitive* field still has no grounded answer."""
+    from linkedin_easy_apply.store import is_sensitive_question
+
     leftover = unanswered_required_fields(fields or [])
-    if not leftover:
+    sensitive = [
+        field
+        for field in leftover
+        if is_sensitive_question(str(field.get("question") or ""))
+    ]
+    if not sensitive:
         return ""
-    question = " ".join(str(leftover[0].get("question") or "").split())
+    question = " ".join(str(sensitive[0].get("question") or "").split())
     if not question:
-        question = str(leftover[0].get("kind") or "field")
+        question = str(sensitive[0].get("kind") or "field")
     return "Unanswered required question: " + question
 
 

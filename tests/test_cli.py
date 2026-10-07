@@ -99,3 +99,14 @@ def test_validate_configuration_rejects_missing_firefox_profile(monkeypatch, tmp
 
     errors = validate_configuration()
     assert any("FIREFOX_PROFILE_PATH is not a directory" in error for error in errors)
+
+
+def test_prepare_local_llm_prints_warmup(monkeypatch, capsys):
+    from linkedin_easy_apply.cli import _prepare_local_llm
+
+    monkeypatch.setattr(
+        "linkedin_easy_apply.llm.warmup_ollama",
+        lambda: {"detail": "Ollama warmup: model loaded"},
+    )
+    _prepare_local_llm()
+    assert "Ollama warmup: model loaded" in capsys.readouterr().out

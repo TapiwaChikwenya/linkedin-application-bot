@@ -458,6 +458,14 @@ def create_app(
     def diagnostics(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(request, "diagnostics.html", context(request))
 
+    @app.get("/models", response_class=HTMLResponse)
+    def models(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request, "models.html", context(request))
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request, "models.html", context(request))
+
     @app.get("/api/status")
     def api_status() -> dict[str, Any]:
         import config
@@ -490,6 +498,9 @@ def create_app(
         schedule = schedule_status(store)
         counts = store.job_counts()
         last_fit = last_fit_status(events, raw_latest or (last_job or None))
+        if last_fit and last_fit.get("error_kind"):
+            llm["last_fit_error"] = last_fit["error_kind"]
+            llm["last_fit_detail"] = str(last_fit.get("reason") or last_fit.get("line") or "")
         try:
             metrics = derive_metrics(store)
         except (OSError, TypeError, ValueError, AttributeError, KeyError, RuntimeError, sqlite3.OperationalError):
@@ -753,8 +764,6 @@ def create_app(
         worker=worker,
         ollama=ollama,
         data_dir=data_dir,
-        templates=templates,
-        context_fn=context,
     )
 
     def _scheduler_start() -> dict[str, Any]:

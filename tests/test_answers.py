@@ -90,9 +90,10 @@ def test_search_urls_encode_spaces(monkeypatch):
 
     monkeypatch.setattr(config, "location", ["United States"])
     monkeypatch.setattr(config, "keywords", ["Senior Data Engineer"])
+    monkeypatch.setattr(config, "blackListTitles", [])
     urls = LinkedinUrlGenerate().generateUrlLinks()
     assert urls
-    assert "keywords=Senior%20Data%20Engineer" in urls[0]
+    assert "keywords=%22Senior%20Data%20Engineer%22" in urls[0]
     assert "location=United%20States" in urls[0]
     assert "Senior Data Engineer" not in urls[0]
     from utils import urlToKeywords

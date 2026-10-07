@@ -45,8 +45,14 @@ py-modules = ["linkedin", "config", "constants", "utils"]
 linkedin_easy_apply = ["dashboard/templates/*.html"]
 
 [tool.pytest.ini_options]
+# Default regression gate for new features: pytest tests -q
+# (or powershell -File scripts/test-regression.ps1). Do not consider a feature
+# done until this suite is green. Tests mock Ollama and never start LinkedIn.
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "regression: included in the default pytest tests -q gate",
+]
 
 [tool.ruff]
 target-version = "py310"
