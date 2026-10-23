@@ -225,3 +225,88 @@ def test_classify_pending_uses_heuristics_when_ollama_down(tmp_path, monkeypatch
     row = store.list_questions(status="pending")[0]
     assert row["classified_kind"] == "email"
     store.close()
+
+
+LAKEHOUSE = (
+    "Have you personally designed and implemented a data lake or "
+    "Lakehouse architecture using ADLS Gen2 and Delta Lake?"
+)
+
+
+def test_yes_titled_radio_keeps_the_prompt_and_yes_no_choices(tmp_path):
+    store = Store(str(tmp_path / "echo.sqlite"))
+    row = store.upsert_question(
+        raw_question="Yes",
+        field_kind="radio",
+        options=[LAKEHOUSE, LAKEHOUSE],
+    )
+    assert row is not None
+    assert row["raw_question"] == LAKEHOUSE
+    assert row["cleaned_question"] == LAKEHOUSE
+    assert row["classified_kind"] == "yes_no"
+    assert row["answer_shape"] == "yes_no"
+    assert row["options"] == ["Yes", "No"]
+    assert row["normalized_question"] != "yes"
+    store.close()
+
+
+def test_real_yes_no_and_gender_choices_are_not_rewritten():
+    yes_no = heuristic_classify(
+        "Are you legally authorized to work in the United States?",
+        "radio",
+        ["Yes", "No"],
+    )
+    assert yes_no["kind"] == "yes_no"
+    assert "relabel_question" not in yes_no
+    gender = heuristic_classify("Gender", "radio", ["Male", "Female", "Decline"])
+    assert gender["kind"] == "select"
+    assert "relabel_question" not in gender
+
+
+def test_repair_clears_prompt_that_was_saved_as_the_answer(tmp_path):
+    import json
+
+    from linkedin_easy_apply.question_capture import option_set_hash
+
+    store = Store(str(tmp_path / "legacy.sqlite"))
+    row = store.upsert_question(
+        raw_question="Yes",
+        field_kind="radio",
+        options=[LAKEHOUSE, LAKEHOUSE],
+    )
+    assert row is not None
+    with store.connection(write=True) as conn:
+        conn.execute(
+            """
+            UPDATE questions
+            SET raw_question = ?, normalized_question = ?, options_json = ?, option_set_hash = ?,
+                cleaned_question = ?, classified_kind = 'select', answer_shape = 'select',
+                classification_status = 'heuristic', approved_value = ?, approval_status = 'approved'
+            WHERE id = ?
+            """,
+            (
+                "Yes",
+                "yes",
+                json.dumps([LAKEHOUSE, LAKEHOUSE]),
+                option_set_hash("radio", [LAKEHOUSE, LAKEHOUSE]),
+                "Yes",
+                LAKEHOUSE,
+                int(row["id"]),
+            ),
+        )
+    assert repair_contact_classifications(store) >= 1
+    fixed = store.get_question(row["id"])
+    assert fixed is not None
+    assert fixed["raw_question"] == LAKEHOUSE
+    assert fixed["classified_kind"] == "yes_no"
+    assert fixed["options"] == ["Yes", "No"]
+    assert fixed["approval_status"] == "pending"
+    assert fixed["approved_value"] == ""
+    store.approve_question(fixed["id"], "no")
+    approved = store.get_question(fixed["id"])
+    assert approved is not None
+    assert approved["approved_value"] == "No"
+    assert approved["approval_status"] == "approved"
+    matches = store.retrieve_approved_answers([{"question": LAKEHOUSE, "kind": "radio"}])
+    assert matches and matches[0]["value"] == "No"
+    store.close()

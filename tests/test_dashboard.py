@@ -127,7 +127,8 @@ def test_console_pages_render(tmp_path):
     assert "A approve" in questions.text
     assert "cleaned_question" in questions.text
     assert "answer_shape" in questions.text
-    assert 'inputKinds = ["email", "tel", "text", "number"]' in questions.text
+    assert 'freeKinds = ["email", "tel", "text", "number", "textarea", "date", "unknown"]' in questions.text
+    assert 'placeholder="Type or pick an answer"' in questions.text
     assert "row.cleaned_question || row.question_text" in questions.text
     assert "isPlaceholderOption" in questions.text
     models = client.get("/models")
@@ -619,6 +620,49 @@ def test_questions_api_repairs_repeated_email_select(tmp_path, monkeypatch):
     assert listed["prefill"] == "me@example.com"
     assert "[email]" not in (listed.get("options") or [])
     assert listed["seen_count"] >= 9
+
+
+def test_questions_api_repairs_yes_radio_echo_into_typeable_prompt(tmp_path):
+    import json
+
+    from linkedin_easy_apply.question_capture import option_set_hash
+
+    prompt = (
+        "Have you personally designed and implemented a data lake or "
+        "Lakehouse architecture using ADLS Gen2 and Delta Lake?"
+    )
+    client, store = _client(tmp_path)
+    row = store.upsert_question(raw_question="Yes", field_kind="radio", options=[prompt, prompt])
+    assert row is not None
+    with store.connection(write=True) as conn:
+        conn.execute(
+            """
+            UPDATE questions
+            SET raw_question = 'Yes', normalized_question = 'yes', options_json = ?,
+                option_set_hash = ?, cleaned_question = 'Yes', classified_kind = 'select',
+                answer_shape = 'select', classification_status = 'heuristic',
+                approved_value = ?, approval_status = 'approved'
+            WHERE id = ?
+            """,
+            (
+                json.dumps([prompt, prompt]),
+                option_set_hash("radio", [prompt, prompt]),
+                prompt,
+                int(row["id"]),
+            ),
+        )
+    payload = client.get("/api/questions", params={"status": "pending"}).json()
+    listed = payload["questions"][0]
+    assert listed["question_text"] == prompt
+    assert listed["kind"] == "yes_no"
+    assert listed["options"] == ["Yes", "No"]
+    assert listed["prefill"] == ""
+    assert listed["approved_value"] == ""
+    page = client.get("/questions")
+    assert page.status_code == 200
+    assert 'placeholder="Type or pick an answer"' in page.text
+    assert "bootQuestions" in page.text
+    assert "<select data-answer=" not in page.text
 
 
 def test_questions_api_uses_cleaned_email_and_hides_dupes(tmp_path):

@@ -99,7 +99,14 @@ CLASSIFY_PROMPT = (
     "duplicate_of_id (optional integer), confidence (0 to 1).\n"
     "kind must be one of: email, tel, number, text, select, textarea, yes_no, "
     "file, date, unknown.\n"
-    "cleaned_question is a short operator-facing prompt, not an answer value.\n"
+    "cleaned_question is the prompt the applicant must answer, never Yes or No "
+    "by itself, and never a copy of an answer.\n"
+    "LinkedIn radios often store the choice word Yes as the question and repeat "
+    "the real prompt in every option. When that happens, cleaned_question is "
+    "that prompt.\n"
+    "Use yes_no only when the applicant must choose Yes or No. Use number for "
+    "years or counts. Use textarea when they must write an explanation. Use "
+    "text for a short free-text answer that is not yes/no.\n"
     "If this is the same question as another id you are given, set "
     "duplicate_of_id; otherwise omit it.\n"
 )
@@ -200,6 +207,33 @@ def _option_labels(options: list[str]) -> set[str]:
         if text:
             labels.add(text)
     return labels
+
+
+def echoed_radio_prompt(raw_question: str, options: list[str] | None) -> str:
+    """Real prompt when LinkedIn stored the choice word and repeated the question.
+
+    Easy Apply puts the full prompt on every radio ``aria-label`` and the visible
+    choice (Yes/No) in a sibling. Older captures saved the choice as the question
+    and the prompt twice as the only options.
+    """
+    question = normalize_question(raw_question)
+    if question not in {"yes", "no"}:
+        return ""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for option in options or []:
+        text = " ".join(str(option).split()).strip()
+        key = normalize_question(text)
+        if not key or key in seen or key in {"yes", "no"} or _is_ui_placeholder(text):
+            continue
+        seen.add(key)
+        labels.append(text)
+    if len(labels) != 1:
+        return ""
+    prompt = labels[0]
+    if len(prompt) < 16 or len(prompt.split()) < 4:
+        return ""
+    return prompt
 
 
 def is_yes_no_options(options: list[str] | None) -> bool:
@@ -311,6 +345,19 @@ def heuristic_classify(
             "not_user_answerable": False,
             "confidence": 0.9,
             "source": "heuristic",
+        }
+    echo = echoed_radio_prompt(raw, option_list)
+    if echo:
+        return {
+            "cleaned_question": echo,
+            "kind": "yes_no",
+            "answer_shape": "yes_no",
+            "cluster_key": cluster_key_for(echo, "yes_no", ["Yes", "No"]),
+            "not_user_answerable": False,
+            "confidence": 0.8,
+            "source": "heuristic",
+            "relabel_question": echo,
+            "replace_options": ["Yes", "No"],
         }
     if yes_no_opts or _YES_NO_HINT_RE.search(text) or _YEARS_OF_AGE_RE.search(text):
         return {
@@ -510,7 +557,29 @@ def _persist_classification(store: Any, row: dict[str, Any], result: dict[str, A
         ),
         not_user_answerable=bool(result.get("not_user_answerable")),
     )
-    return saved or {**row, **result}
+    saved = saved or {**row, **result}
+    relabel = str(result.get("relabel_question") or "").strip()
+    relabel_fn = getattr(store, "relabel_captured_question", None)
+    if relabel and callable(relabel_fn):
+        options = result.get("replace_options")
+        if not isinstance(options, list):
+            options = ["Yes", "No"]
+        try:
+            relabeled = relabel_fn(
+                saved.get("id") or row.get("id"),
+                raw_question=relabel,
+                options=[str(option) for option in options],
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            log.warning(
+                "question relabel skipped id=%s err=%s",
+                row.get("id"),
+                exc.__class__.__name__,
+            )
+            relabeled = None
+        if relabeled:
+            saved = relabeled
+    return saved
 
 
 def _maybe_merge(store: Any, row: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -551,6 +620,11 @@ def classification_needs_repair(row: dict[str, Any] | None) -> bool:
         return True
     if wanted == "tel" and cleaned.casefold() != "phone":
         return True
+    if echoed_radio_prompt(
+        str(row.get("raw_question") or row.get("question_text") or ""),
+        _options(row),
+    ):
+        return True
     return stored in {"select", "radio"} and wanted in {"email", "tel", "text", "number"}
 
 
@@ -565,17 +639,23 @@ def repair_contact_classifications(store: Any, *, limit: int = 300) -> int:
     except (OSError, TypeError, ValueError):
         return 0
     for row in rows:
-        if not classification_needs_repair(row):
+        current = row
+        getter = getattr(store, "get_question", None)
+        if callable(getter):
+            fresh = getter(row.get("id"))
+            if fresh:
+                current = fresh
+        if not classification_needs_repair(current):
             continue
-        result = _heuristic_for_row(row)
+        result = _heuristic_for_row(current)
         try:
-            saved = _persist_classification(store, row, result)
+            saved = _persist_classification(store, current, result)
             _maybe_merge(store, saved, result)
             repaired += 1
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             log.warning(
                 "contact classify repair skipped id=%s err=%s",
-                row.get("id"),
+                current.get("id"),
                 exc.__class__.__name__,
             )
     return repaired
@@ -633,6 +713,22 @@ def classify_question_with_llm(
             result = parsed
         elif attempted_llm:
             result["classification_status"] = "llm"
+    echo = echoed_radio_prompt(
+        str(row.get("raw_question") or row.get("question_text") or ""),
+        _options(row),
+    )
+    if echo:
+        result["relabel_question"] = echo
+        kind = _canonical_kind(str(result.get("kind") or ""))
+        if kind in {"text", "textarea", "number"}:
+            result["replace_options"] = []
+            result["cleaned_question"] = str(result.get("cleaned_question") or echo)
+        else:
+            result["kind"] = "yes_no"
+            result["answer_shape"] = "yes_no"
+            result["replace_options"] = ["Yes", "No"]
+            result["cleaned_question"] = echo
+            result["cluster_key"] = cluster_key_for(echo, "yes_no", ["Yes", "No"])
     if store is not None:
         saved = _persist_classification(store, row, result)
         merged = _maybe_merge(store, saved, result)

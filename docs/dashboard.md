@@ -243,6 +243,12 @@ Each row shows cleaned question text (repeated labels collapsed, not concatenate
 raw capture), options, a kind badge (email, years,
 yes/no, text, …), source, `seen_count`, last job title/company, proposed value,
 an answer field, Approve, Reject, and client-side Skip.
+The answer field is always editable. Yes/No and other short choices are
+suggestions in a typeable box, not a locked dropdown. Ollama classifies the
+newest pending prompts before the table renders (`POST /api/questions/classify-pending`);
+heuristics still repair email, phone, years, and radio prompts whose options
+are a copy of the question if Llama is down. Refresh Questions after a capture
+to see the repaired prompt and type over the suggestion.
 Email is never a `<select>` of `[email]`. Heuristics treat LinkedIn placeholder
 options (`Select an option`, `[email]`, `email addresses`) as kind `email`,
 cleaned title **Email**, `answer_shape=text`. The answer control is
@@ -250,8 +256,9 @@ cleaned title **Email**, `answer_shape=text`. The answer control is
 on the live SQLite file so already-stored select rows are rewritten before the
 list returns. **Refresh Questions** after a worker capture or after upgrading
 the dashboard to see the repaired title and text input. Phone follows the same
-placeholder path (`tel`). The page also calls `POST /api/questions/classify-pending`
-once after load so Llama can polish wording; heuristics already ran on capture.
+placeholder path (`tel`). The page calls `POST /api/questions/classify-pending`
+before the first table paint so Llama can correct kind; heuristics already ran
+on capture and again on that request.
 Skip only hides the row in this browser session. There is no bulk-approve.
 Seed rows stay pending until you approve them; that is how RAG memory grows.
 The **Generate seed questions** control is the highlighted panel at the top of
