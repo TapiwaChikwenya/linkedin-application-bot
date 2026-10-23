@@ -279,6 +279,15 @@ def test_linkedin_radio_groups_are_collected_once_by_fieldset():
     assert field_kind_from_attrs(tag="fieldset") == "radio"
 
 
+def test_radio_collector_uses_visible_choice_not_question_aria_label():
+    from linkedin_easy_apply.page_snapshot import COLLECT_JS, RADIO_CHOICE_JS
+
+    assert "function radioChoiceLabel" in COLLECT_JS
+    assert "previousElementSibling" in COLLECT_JS
+    assert 'radio.innerText || radio.getAttribute("aria-label") || radio.value' not in COLLECT_JS
+    assert "return radioChoiceLabel(arguments[0])" in RADIO_CHOICE_JS
+
+
 def test_find_container_uses_shadow_aware_semantic_script_first():
     expected = object()
 

@@ -1539,6 +1539,8 @@ class Linkedin:
                 sleep_human(self.pace(), "field")
                 return True
             if kind == "radio":
+                from linkedin_easy_apply.page_snapshot import RADIO_CHOICE_JS
+
                 chosen = match_option(raw, list(field.get("options") or [])) or raw
                 options = self.driver.execute_script(
                     "const el = arguments[0];"
@@ -1548,12 +1550,26 @@ class Linkedin:
                 ) or []
                 target = chosen.lower()
                 for option in options:
+                    visible = ""
+                    try:
+                        visible = str(self.driver.execute_script(RADIO_CHOICE_JS, option) or "")
+                    except WebDriverException:
+                        visible = ""
+                    aria = option.get_attribute("aria-label") or ""
+                    short_aria = aria if len(aria) <= 40 else ""
                     label = " ".join(filter(None, [
+                        visible,
                         option.text,
-                        option.get_attribute("aria-label"),
+                        short_aria,
                         option.get_attribute("value"),
                     ])).lower()
-                    if target == label or target in label or label.startswith(target):
+                    visible_l = visible.lower()
+                    if (
+                        target == label
+                        or target == visible_l
+                        or label.startswith(target)
+                        or (visible_l and target.startswith(visible_l) and len(visible_l) > 1)
+                    ):
                         sleep_human(self.pace(), "field")
                         self.driver.execute_script("arguments[0].click();", option)
                         return True

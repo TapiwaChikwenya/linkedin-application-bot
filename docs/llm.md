@@ -590,6 +590,11 @@ Allowed `kind`: `email`, `tel`, `number`, `text`, `select`, `textarea`,
 - **city / location** with placeholder-only options → `text`, not `select`
 - **years of experience / how many years** → `number` (not “years of age”)
 - **yes/no options, authorized, sponsorship, willing to** → `yes_no`
+- **LinkedIn radio echo** — captured question is only `Yes` or `No`, and the
+  options are one long prompt repeated. The prompt becomes the question,
+  choices become `Yes` / `No`, and an approved value that is only that prompt
+  returns to pending. The Questions answer box is a typeable field with those
+  choices as suggestions, so the operator can type a different answer.
 - **resume / cv / curriculum vitae** → `file`, hidden from the pending queue
 - Everything else keeps light whitespace cleanup and the captured kind when it
   is already one of the allowed kinds and the option list has real choices

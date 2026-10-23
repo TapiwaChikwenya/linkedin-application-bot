@@ -73,7 +73,7 @@ def mask_sensitive_text(value: str, limit: int = PUBLIC_VALUE_LIMIT) -> str:
     return compact
 
 
-INPUT_ANSWER_KINDS = frozenset({"email", "tel", "text", "number"})
+INPUT_ANSWER_KINDS = frozenset({"email", "tel", "text", "number", "textarea", "date", "unknown"})
 
 
 def _is_sensitive_value(value: str) -> bool:
@@ -96,6 +96,23 @@ def _config_contact_prefill(kind: str) -> str:
     return ""
 
 
+def _usable_choice_options(question: str, options: list[str]) -> list[str]:
+    """Drop placeholders and options that are the question text repeated."""
+    from linkedin_easy_apply.question_capture import normalize_question
+
+    question_key = normalize_question(question)
+    usable: list[str] = []
+    seen: set[str] = set()
+    for option in options:
+        text = " ".join(str(option).split())
+        key = normalize_question(text)
+        if not key or key in seen or len(text) > 80 or key == question_key:
+            continue
+        seen.add(key)
+        usable.append(text)
+    return usable
+
+
 def public_question(row: dict[str, Any]) -> dict[str, Any]:
     proposed = str(row.get("proposed_value") or "")
     approved = str(row.get("approved_value") or "")
@@ -114,10 +131,19 @@ def public_question(row: dict[str, Any]) -> dict[str, Any]:
     if kind in INPUT_ANSWER_KINDS:
         options: list[str] = []
     else:
-        options = [mask_sensitive_text(str(option)) for option in row.get("options") or []]
+        options = _usable_choice_options(
+            text,
+            [mask_sensitive_text(str(option)) for option in row.get("options") or []],
+        )
+    if kind == "yes_no" and not options:
+        options = ["Yes", "No"]
     prefill = _config_contact_prefill(kind) if kind in {"email", "tel"} else ""
     if not prefill:
         prefill = "" if _is_sensitive_value(proposed) else proposed
+    from linkedin_easy_apply.question_capture import normalize_question
+
+    if prefill and normalize_question(prefill) == normalize_question(text):
+        prefill = ""
     return {
         "question_id": question_id,
         "question_text": mask_sensitive_text(text),

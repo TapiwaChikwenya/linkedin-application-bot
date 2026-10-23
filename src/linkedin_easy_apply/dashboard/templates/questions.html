@@ -5,9 +5,9 @@
     <section class="memory-panel">
       <h2>Memory queue</h2>
       <p class="muted">
-        Approved answers are local RAG memory. Llama weights are never fine-tuned.
-        Captured prompts are classified (email, years, yes/no) before you answer.
-        Heuristics work if Ollama is down; Llama only cleans wording.
+        Captured prompts are classified before they are listed. Ollama reads the
+        newest questions first and decides yes/no versus a written answer.
+        The answer box stays editable: pick a suggestion, or type a different answer.
       </p>
       <div class="memory-kpis">
         <span>PENDING <b id="kpiPending">0</b></span>
@@ -77,34 +77,57 @@ function isPlaceholderOption(option) {
     || text === "[email]" || text === "[phone]" || text === "email" || text === "email address"
     || text === "email addresses" || text === "[redacted-email]" || text === "[redacted-phone]";
 }
+function usableOptions(row) {
+  const question = String(row.cleaned_question || row.question_text || "").trim().toLowerCase();
+  return (row.options || []).filter(option => {
+    if (isPlaceholderOption(option)) return false;
+    const text = String(option || "").trim();
+    if (!text || text.length > 80) return false;
+    if (question && text.toLowerCase() === question) return false;
+    return true;
+  });
+}
 function optionList(row) {
-  const kind = (row.classified_kind || row.kind || "").toLowerCase();
-  if (["email", "tel", "text", "number"].includes(kind)) return "";
-  const options = (row.options || []).filter(option => !isPlaceholderOption(option));
+  const options = usableOptions(row);
   if (!options.length) return "";
   return `<div class="muted">${options.map(esc).join(" · ")}</div>`;
+}
+function answerValue(row) {
+  const question = String(row.cleaned_question || row.question_text || "").trim().toLowerCase();
+  const candidates = [row.prefill, row.approved_value, row.proposed_value];
+  for (const candidate of candidates) {
+    const text = String(candidate || "").trim();
+    if (!text) continue;
+    if (question && text.toLowerCase() === question) continue;
+    return text;
+  }
+  return "";
 }
 function answerControl(row) {
   const kind = (row.classified_kind || row.kind || "").toLowerCase();
   const shape = (row.answer_shape || "").toLowerCase();
-  const value = esc(row.prefill || row.approved_value || "");
-  const inputKinds = ["email", "tel", "text", "number"];
-  if (inputKinds.includes(kind) || inputKinds.includes(shape)) {
+  const value = esc(answerValue(row));
+  const id = esc(row.question_id);
+  const freeKinds = ["email", "tel", "text", "number", "textarea", "date", "unknown"];
+  if (freeKinds.includes(kind) || freeKinds.includes(shape)) {
+    if (kind === "textarea" || shape === "textarea") {
+      return `<textarea data-answer="${id}" rows="3" placeholder="Type an answer">${value}</textarea>`;
+    }
     let type = "text";
     if (kind === "number" || shape === "number") type = "number";
     else if (kind === "tel" || shape === "tel") type = "tel";
     else if (kind === "email") type = "email";
-    return `<input type="${type}" data-answer="${esc(row.question_id)}" value="${value}" placeholder="answer">`;
+    else if (kind === "date" || shape === "date") type = "text";
+    return `<input type="${type}" data-answer="${id}" value="${value}" placeholder="Type an answer">`;
   }
-  const options = (row.options || []).filter(option => !isPlaceholderOption(option));
-  if (options.length) {
-    const opts = options.map(option => {
-      const selected = String(option).toLowerCase() === String(row.prefill || row.approved_value || "").toLowerCase() ? " selected" : "";
-      return `<option value="${esc(option)}"${selected}>${esc(option)}</option>`;
-    }).join("");
-    return `<select data-answer="${esc(row.question_id)}">${opts}</select>`;
+  const options = usableOptions(row);
+  const choices = options.length ? options : (kind === "yes_no" ? ["Yes", "No"] : []);
+  if (choices.length) {
+    const listId = "choices-" + id;
+    const opts = choices.map(option => `<option value="${esc(option)}"></option>`).join("");
+    return `<input data-answer="${id}" list="${listId}" value="${value}" placeholder="Type or pick an answer"><datalist id="${listId}">${opts}</datalist>`;
   }
-  return `<input data-answer="${esc(row.question_id)}" value="${value}" placeholder="answer">`;
+  return `<textarea data-answer="${id}" rows="3" placeholder="Type an answer">${value}</textarea>`;
 }
 function originLabel(row) {
   const origin = row.origin || row.source || "";
@@ -315,7 +338,15 @@ async function classifyPendingOnce() {
   }
   loadQuestions();
 }
-loadQuestions();
-classifyPendingOnce();
+async function bootQuestions() {
+  const counts = document.getElementById("counts");
+  const body = document.getElementById("rows");
+  if (counts) counts.textContent = "Ollama is reading questions…";
+  if (body) {
+    body.innerHTML = `<tr><td colspan="9" class="muted">Ollama is classifying questions before they are listed. You can type over any suggested answer.</td></tr>`;
+  }
+  await classifyPendingOnce();
+}
+bootQuestions();
 </script>
 {% endblock %}

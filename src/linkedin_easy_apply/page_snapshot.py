@@ -4,7 +4,64 @@ from __future__ import annotations
 
 from typing import Any
 
-COLLECT_JS = r"""
+_RADIO_HELPERS_JS = r"""
+function normText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+function radioChoiceLabel(radio) {
+  const aria = normText(radio.getAttribute("aria-label"));
+  let node = radio.parentElement;
+  for (let depth = 0; depth < 6 && node; depth += 1) {
+    const found = [];
+    const bits = node.querySelectorAll("p, span, label");
+    for (const el of bits) {
+      if (el.contains(radio)) continue;
+      if (el.closest && el.closest("legend")) continue;
+      const text = normText(el.innerText || el.textContent).replace(/\*+$/, "").trim();
+      if (!text || text === aria) continue;
+      if (text.length > 60) continue;
+      if (aria && aria.toLowerCase().indexOf(text.toLowerCase()) === 0 && text.length > 24) continue;
+      found.push(text);
+    }
+    if (found.length) {
+      found.sort((a, b) => a.length - b.length || a.localeCompare(b));
+      return found[0];
+    }
+    const role = (node.getAttribute && node.getAttribute("role")) || "";
+    const tag = (node.tagName || "").toLowerCase();
+    if (role === "radiogroup" || tag === "fieldset") break;
+    node = node.parentElement;
+  }
+  const value = normText(radio.value);
+  if (value && value.length <= 40 && !/^\[?redacted/i.test(value)) return value;
+  if (aria && aria.length <= 40) return aria;
+  return "";
+}
+function radioPrompt(host) {
+  if (!host) return "";
+  const legend = host.querySelector ? host.querySelector("legend") : null;
+  const legendText = normText(legend && (legend.innerText || legend.textContent)).replace(/\*+$/, "").trim();
+  if (legendText && legendText.length > 8 && !/^(yes|no)$/i.test(legendText)) return legendText;
+  let prev = host.previousElementSibling;
+  for (let i = 0; i < 4 && prev; i += 1) {
+    const text = normText(prev.innerText || prev.textContent).replace(/\*+$/, "").trim();
+    if (text && text.length > 12 && !/^(yes|no)$/i.test(text)) return text;
+    prev = prev.previousElementSibling;
+  }
+  const radios = host.querySelectorAll ? host.querySelectorAll("[role='radio'], input[type='radio']") : [];
+  const labels = [];
+  for (const radio of radios) {
+    const aria = normText(radio.getAttribute("aria-label"));
+    if (aria) labels.push(aria);
+  }
+  if (labels.length && labels.every((item) => item === labels[0]) && labels[0].length > 12) return labels[0];
+  return "";
+}
+"""
+
+RADIO_CHOICE_JS = _RADIO_HELPERS_JS + "\nreturn radioChoiceLabel(arguments[0]);\n"
+
+COLLECT_JS = _RADIO_HELPERS_JS + r"""
 const root = arguments[0] || document.documentElement;
 const selector = arguments[1];
 const elements = [];
@@ -32,7 +89,7 @@ const metas = elements.map((el) => {
   const groupText = legend
     ? (legend.innerText || legend.textContent || "")
     : (group ? (group.innerText || group.textContent || "").split("\n")[0] : "");
-  const question = [labelled, labels, el.getAttribute("aria-label"), el.placeholder, el.name, groupText]
+  let question = [labelled, labels, el.getAttribute("aria-label"), el.placeholder, el.name, groupText]
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
@@ -55,10 +112,18 @@ const metas = elements.map((el) => {
   if (kind === "select") {
     for (const opt of el.options || []) options.push((opt.text || opt.value || "").trim());
   } else if (kind === "radio") {
-    const radios = (group || el).querySelectorAll("[role='radio'], input[type='radio']");
+    const host = group || el;
+    const prompt = radioPrompt(host);
+    if (prompt) question = prompt;
+    const radios = host.querySelectorAll("[role='radio'], input[type='radio']");
+    const seen = new Set();
     for (const radio of radios) {
-      const label = (radio.innerText || radio.getAttribute("aria-label") || radio.value || "").trim();
-      if (label) options.push(label);
+      const choice = radioChoiceLabel(radio);
+      const key = choice.toLowerCase();
+      if (!choice || seen.has(key)) continue;
+      if (prompt && key === prompt.toLowerCase()) continue;
+      seen.add(key);
+      options.push(choice);
     }
   }
   const required = !!(
