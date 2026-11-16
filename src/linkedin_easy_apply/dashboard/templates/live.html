@@ -50,14 +50,21 @@ window.onStatus = function(data) {
   const ollama = data.ollama || {};
   const alive = data.worker && data.worker.alive;
   const pending = Number((data.questions && data.questions.pending) || 0);
+  const retry = Number(data.review_retry || 0);
   const cue = document.getElementById("questionCue");
   if (cue) {
     cue.hidden = false;
+    const parts = [];
     if (pending > 0) {
-      cue.innerHTML = `<a href="/questions">${pending} question${pending === 1 ? "" : "s"} need answers</a>`;
-    } else {
-      cue.innerHTML = `<a href="/questions#seeds">Generate seed questions</a> to grow RAG memory. Seeds stay pending until you approve them.`;
+      parts.push(`<a href="/questions">${pending} question${pending === 1 ? "" : "s"} need answers</a>`);
     }
+    if (retry > 0) {
+      parts.push(`<a href="/questions">${retry} approved application${retry === 1 ? "" : "s"} will retry on the next run</a>`);
+    }
+    if (!parts.length) {
+      parts.push(`<a href="/questions#seeds">Generate seed questions</a> to grow RAG memory. Seeds stay pending until you approve them.`);
+    }
+    cue.innerHTML = parts.join(" · ");
   }
   document.getElementById("searchNow").textContent = search.keyword
     ? (search.keyword + " · " + (search.location || "—"))

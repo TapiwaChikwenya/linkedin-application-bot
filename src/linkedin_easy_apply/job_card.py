@@ -19,6 +19,7 @@ SKIP_ALREADY_APPLIED = "Already applied"
 SKIP_NO_EASY_APPLY = "No Easy Apply on search card"
 SKIP_EXTERNAL = "Off-site apply, not Easy Apply"
 SKIP_UNKNOWN_CARD = "Search card title missing; skipped without opening"
+SKIP_NO_JOB_ID = "Semantic card did not expose a job id"
 
 _ON_SITE = re.compile(r"\bon[\s-]?site\b", re.IGNORECASE)
 _REMOTE_WORK = re.compile(r"\bremote\b", re.IGNORECASE)
@@ -79,6 +80,8 @@ _ALREADY_APPLIED = re.compile(
 )
 _APPLIED_TOKEN = re.compile(r"(?:^|[\s·•,])applied(?:$|[\s·•,])", re.IGNORECASE)
 _JOB_VIEW_ID = re.compile(r"/jobs/view/(\d+)", re.IGNORECASE)
+_SELECTED_PREFIX = re.compile(r"^selected,\s*", re.IGNORECASE)
+_VERIFIED_SPLIT = re.compile(r"\s*\(verified job\)\s*", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,20 @@ class SearchCard:
     apply_kind: str = APPLY_KIND_MISSING
     source: str = "html"
     snippet: str = ""
+
+
+_OCCLUDABLE_ID_RE = re.compile(
+    r"""data-occludable-job-id\s*=\s*["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+
+
+def job_id_from_markup(html: str) -> str:
+    """Read a listing id already present on a card. Does not open the job."""
+    match = _OCCLUDABLE_ID_RE.search(html or "")
+    if not match:
+        return ""
+    return normalize_job_id(match.group(1))
 
 
 def normalize_job_id(raw: str) -> str:
@@ -221,12 +238,16 @@ def card_skip_decision(
     card: SearchCard,
     *,
     applied_in_store: bool = False,
+    stored_status: str = "",
 ) -> tuple[str, str] | None:
     """Return (status, reason) when the job page must not be opened."""
-    if applied_in_store or card.apply_kind == APPLY_KIND_APPLIED:
+    recorded = str(stored_status or "").strip().lower()
+    if applied_in_store:
+        recorded = recorded or "applied"
+    if recorded in {"applied", "already_applied"} or card.apply_kind == APPLY_KIND_APPLIED:
         return "already_applied", SKIP_ALREADY_APPLIED
-    if not (card.job_id or "").strip():
-        return "skipped_filter", SKIP_UNKNOWN_CARD
+    if recorded in {"skipped_fit", "failed", "needs_review"}:
+        return recorded, "Already recorded as " + recorded
     if not (card.title or "").strip():
         return "skipped_filter", SKIP_UNKNOWN_CARD
     if should_skip_job(card.title, card.company):
@@ -237,6 +258,8 @@ def card_skip_decision(
         return "failed", SKIP_EXTERNAL
     if card.apply_kind != APPLY_KIND_EASY:
         return "failed", SKIP_NO_EASY_APPLY
+    if not (card.job_id or "").strip():
+        return "skipped_filter", SKIP_UNKNOWN_CARD
     return None
 
 
@@ -286,6 +309,51 @@ def apply_card_fallbacks(
         apply_kind=apply_kind,
         source=source,
         snippet=card.snippet or clean_label(extra_text)[:1200],
+    )
+
+
+def semantic_title(raw: str) -> str:
+    """Collapse LinkedIn's repeated semantic-search title line."""
+    text = _SELECTED_PREFIX.sub("", clean_label(raw))
+    parts = [clean_label(part) for part in _VERIFIED_SPLIT.split(text) if clean_label(part)]
+    if not parts:
+        return ""
+    visible = parts[-1]
+    words = visible.split()
+    if len(words) >= 2 and len(words) % 2 == 0:
+        midpoint = len(words) // 2
+        if words[:midpoint] == words[midpoint:]:
+            visible = " ".join(words[:midpoint])
+    if visible.lower() in GENERIC_LABELS:
+        return ""
+    return visible
+
+
+def parse_semantic_card(paragraphs: list[str], job_id: str = "") -> SearchCard:
+    """Parse one `/jobs/search-results/` card from its paragraph texts.
+
+    LinkedIn's semantic results page has no `li[data-occludable-job-id]`. Each
+    card is a button whose paragraphs are title, company, location, then
+    metadata such as salary and Easy Apply.
+    """
+    paras: list[str] = []
+    for item in paragraphs or []:
+        cleaned = clean_label(str(item or ""))
+        if not cleaned or cleaned in {"·", "•", "|"}:
+            continue
+        paras.append(cleaned)
+    title = semantic_title(paras[0]) if paras else ""
+    company = paras[1] if len(paras) > 1 else ""
+    location = paras[2] if len(paras) > 2 else ""
+    blob = " ".join(paras)
+    return SearchCard(
+        job_id=normalize_job_id(job_id),
+        title=title,
+        company=company,
+        location=location,
+        apply_kind=classify_card_apply(blob),
+        source="semantic",
+        snippet="",
     )
 
 

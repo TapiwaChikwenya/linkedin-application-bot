@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS runs (
     stopped_at TEXT,
     status TEXT NOT NULL,
     applied_count INTEGER NOT NULL DEFAULT 0,
-    skipped_count INTEGER NOT NULL DEFAULT 0
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    resume_job_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -544,6 +545,7 @@ class Store:
                 if "no such column" not in str(exc).lower():
                     raise
             self._ensure_jobs_schema()
+            self._ensure_runs_schema()
             self._ensure_questions_schema()
             self._ensure_operator_schema()
         self.backfill_job_metrics()
@@ -856,6 +858,28 @@ class Store:
     def _table_columns(self, table: str) -> list[str]:
         rows = self._conn.execute("PRAGMA table_info(" + table + ")").fetchall()
         return [str(row["name"]) for row in rows]
+
+    def _ensure_runs_schema(self) -> None:
+        cols = self._table_columns("runs")
+        if cols and "resume_job_id" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN resume_job_id TEXT")
+
+    def set_resume_job(self, run_id: str, job_id: str) -> None:
+        """Remember the search card in progress so a crashed run can continue there."""
+        if not run_id or not job_id:
+            return
+        self._conn.execute(
+            "UPDATE runs SET resume_job_id = ? WHERE run_id = ?",
+            (str(job_id), str(run_id)),
+        )
+        self._conn.commit()
+
+    def crashed_resume_job_id(self) -> str:
+        """Job id to continue from when the latest run crashed. Empty otherwise."""
+        row = self.current_run()
+        if not row or str(row.get("status") or "") != "crashed":
+            return ""
+        return str(row.get("resume_job_id") or "")
 
     def _ensure_jobs_schema(self) -> None:
         """ALTER additive columns on existing jobs tables, then create indexes.
@@ -2137,12 +2161,14 @@ def _bind_store_connections() -> None:
         "merge_duplicate_question",
         "set_setting",
         "add_chat_message",
+        "set_resume_job",
     ):
         setattr(Store, name, _store_tx(True)(getattr(Store, name)))
     for name in (
         "count_jobs",
         "current_run",
         "running_run",
+        "crashed_resume_job_id",
         "get_job",
         "list_jobs",
         "list_events",

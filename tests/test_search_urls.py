@@ -1,11 +1,23 @@
 from urllib.parse import parse_qs, unquote, urlparse
 
+import pytest
+
 from utils import (
     LinkedinUrlGenerate,
+    jobsToPages,
     positive_search_keyword,
     search_keyword_query,
     urlToKeywords,
 )
+
+
+def test_jobs_to_pages_accepts_semantic_result_labels():
+    assert jobsToPages("99+ results") == 4
+    assert jobsToPages("25 results") == 1
+    assert jobsToPages("1,234 jobs") == 40
+    assert jobsToPages("3") == 3
+    with pytest.raises(ValueError):
+        jobsToPages("unknown")
 
 
 def test_phrase_query_quotes_multi_word_keywords():

@@ -7,15 +7,17 @@ suggest short answers from resume facts, config bootstrap maps, and
 **operator-approved Q&A memory**. The Selenium worker still clicks and types.
 The model does not talk to LinkedIn and does not leave this machine.
 
-This is **retrieve-then-generate**, not training. Approving answers in the
-dashboard grows a SQLite lookup table. It does **not** fine-tune Ollama, apply
-LoRA, export a GGUF, or change `llama3.2` weights.
+This is **retrieve-then-generate**, not weight training. Approving an answer
+compiles it into standing memory. The next Ollama call receives that memory
+even when the new question is worded differently. It does **not** fine-tune
+Ollama, apply LoRA, export a GGUF, or change `llama3.2` weights.
 
 ## Scope
 
 In scope: Ollama on `127.0.0.1:11434`, shadow-DOM field collection, JSON answers
 for Yes/No, years, short text, and native selects, SQLite retrieval of approved
-rows, pending seed questions generated for the operator to approve, and a
+rows, a standing-memory slice of recent and most-reused approvals on every
+leftover prompt, pending seed questions generated for the operator to approve, and a
 **job-fit gate** that scores listings from search-card or job-page text.
 
 Out of scope: cloud LLMs, CAPTCHA solving, inventing employer essays, submitting
@@ -41,7 +43,9 @@ mappings for retrieval, not training data.
 Outputs: filled form controls, plus `skipped_fit` / `needs_review` job rows.
 If Ollama is down, the worker still uses approved memory, interpolated related
 answers, then bootstrap maps, and **does not skip the whole run**. The fit gate
-is skipped. Only leftover **sensitive** required fields skip that one job.
+is skipped. A required field that is still empty after one fill attempt skips
+that job instead of clicking Next. A failed Ollama generate skips that job
+and does not start another generate on the same screen.
 
 ## Dependencies
 
@@ -66,19 +70,21 @@ Worker fill order on each Easy Apply step:
    used. If that key is missing, the nearest related family member is used.
    There is still no global `years_experience["default"]` (no invented 9).
 4. **Ollama first pass** — leftover unanswered fields. The prompt includes a
-   compact `approved_answers` slice plus resume/config facts. Llama may infer
+   compact `approved_answers` slice for this form, plus `standing_memory`
+   (newest approvals and highest-reuse confirmations), plus resume/config facts.
+   Llama may infer
    short text (400 character cap) from `resume_text` and approved snippets, and
    interpolate related skill years. It must omit legal, demographic, salary,
    clearance, and sponsorship facts that are not in those sources.
-5. **Ollama second pass** — if the first pass omitted **required non-sensitive**
-   fields. Prompt: infer only from `applicant_facts` and `approved_answers`;
-   interpolate related skill years; omit only if there is no evidence.
+5. **One generate per page** — a successful generate that omits a field does not
+   start another call. A timeout or connection error stops the job immediately.
 6. **Conservative inferred fallback** — still-empty required non-sensitive fields
    may take a grounded integer from a *specific* mapped skill named in the
    question (or its related family). Unknown skills stay empty.
-7. **Skip the job** — only if a **required sensitive** field is still empty
-   (`needs_review`, log `Skipped sensitive unanswered`). Non-sensitive required
-   fields with no evidence stay empty and do **not** abandon the application.
+7. **Skip the job** — if any **required** field is still empty after that attempt
+   (`needs_review`). Sensitive leftovers also log `Skipped sensitive unanswered`.
+   A blank URL, date, or month/year is not submitted. Dates are filled only from
+   a grounded config value; otherwise the job is left for a person.
 
 ```mermaid
 flowchart TD
@@ -91,20 +97,17 @@ flowchart TD
   DI -->|no| F{Specific or related config map?}
   F -->|yes| G[Type bootstrap or related years]
   F -->|no| H{Ollama ready?}
-  H -->|no| I[Leave empty and capture pending]
+  H -->|no| I[Leave empty; skip if still required]
   H -->|yes| J[Retrieve matching and related approved Q and A]
   J --> K[Generate from facts plus approved_answers]
-  K --> K2{Required non-sensitive omitted?}
-  K2 -->|yes| K3[Second pass: infer, interpolate, omit only if no evidence]
-  K2 -->|no| L[Validate ID, field type, option, confidence]
-  K3 --> L
+  K --> L[Validate ID, field type, option, confidence]
   L --> M[Apply grounded JSON answers]
   E --> N[Conservative inferred fallback]
   DJ --> N
   G --> N
   M --> N
   I --> N
-  N --> P{Required sensitive field still empty?}
+  N --> P{Required field still empty?}
   P -->|yes| Q[Skip job needs_review]
   P -->|no| O[Click Next or Submit]
 ```
@@ -123,7 +126,7 @@ or sponsorship facts.
 In scope: related skill-year interpolation, same-family Yes/No interpolation,
 short-text summaries from `resume_text` plus approved snippets (400 character
 cap), a second Ollama pass for required non-sensitive leftovers, a conservative
-mapped-skill fallback, and skip-only-sensitive `needs_review`.
+mapped-skill fallback, and `needs_review` when a required field is still empty.
 
 Out of scope: fine-tuning, a global `years_experience["default"]` of 9, inferring
 sponsorship from work authorization, and logging resume body text.
@@ -138,9 +141,11 @@ sponsorship from work authorization, and logging resume body text.
 | `is_sensitive_question` | Sponsorship, authorization, salary, clearance, demographics |
 
 Outputs: filled integers/Yes-No/short text, log lines `Inferred: …`,
-`Interpolated years X from Y`, and `Skipped sensitive unanswered`. Empty
-non-sensitive required fields continue. Empty sensitive required fields skip
-the job as `needs_review`.
+`Interpolated years X from Y`, and `Unanswered required question`. Empty
+required fields, including a blank URL, date, or month/year with no grounded
+answer, skip the job. The worker does not invent employment dates. A failed
+generate is logged as `Ollama request failed` and is not treated as
+`accepted=0`.
 
 ### Functional flow
 
@@ -158,7 +163,7 @@ flowchart TD
   I -->|no| E
   J --> K{Still empty?}
   K -->|named mapped skill| L[Conservative integer from that skill]
-  K -->|no evidence| M[Leave empty; do not skip]
+  K -->|no evidence| M[Leave empty and skip this job]
   L --> E
   G --> E
 ```
@@ -172,9 +177,9 @@ runs the second generate only when required non-sensitive fields were omitted.
 
 ### Failure paths
 
-- No evidence for a non-sensitive field: leave empty, capture pending, continue.
-- Sensitive required still empty after retrieval/maps: skip `needs_review`.
-- Ollama down: interpolation and mapped related years still run; no second pass.
+- No evidence for a required field after one fill attempt: skip `needs_review` and do not click Next again.
+- A failed generate (timeout or unreachable): log `Ollama request failed` and skip. Do not start another generate on that screen.
+- Ollama down before generate: interpolation and mapped related years still run; no second pass.
 - Unknown skill such as COBOL: never filled with a global 9.
 
 ### Security considerations
@@ -287,8 +292,8 @@ facts for leftover short answers.
 - Invalid JSON or missing `fit`: treat as gate skipped, do not skip the job.
 - Short card snippet: `needs_description`; worker scores after the description
   is on the page, still before Easy Apply.
-- Required **sensitive** form field with no grounded answer: skip that job as
-  `needs_review`. Required non-sensitive leftovers are inferred or left empty.
+- Required form field still empty after one fill attempt: skip that job as
+  `needs_review`. Sensitive leftovers also log `Skipped sensitive unanswered`.
 
 ### Security considerations
 
@@ -350,6 +355,79 @@ value when a retrieved row matches.
 
 Both paths insert **pending** rows. Seeds never write `approved_value`. Until you
 approve a row, it is not in the retrieval pool and cannot fill a live form via RAG.
+
+## Learning loop
+
+### Feature purpose
+
+Make each approved answer available on the next application without retraining
+Ollama. Pending questions stay in the queue until you approve them. They are
+not learned while they wait.
+
+### Scope
+
+In scope: compile approved rows into `standing_memory`, inject that slice into
+every leftover-field prompt, rank by recency and `reuse_count`, and show the
+counts on the Questions page.
+
+Out of scope: LoRA, GGUF export, `ollama create`, and any write to model
+weights. Continuous weight training on this CPU `llama3.2` setup would take
+much longer than an application, can forget earlier answers, and would bypass
+the approval gate.
+
+### Inputs and outputs
+
+| Input | Output |
+|---|---|
+| `questions.approval_status = approved` and a non-empty `approved_value` | Up to 16 prompt rows |
+| Newest 8 approvals | Reserved first, so a new label is not crowded out by phone/email reuse |
+| Remaining slots | Highest `reuse_count`, then most recently seen |
+| `proposed_value` different from `approved_value` | `corrected=true` on that row |
+| Pending, rejected, file, password, or merged-away rows | Omitted |
+
+`GET /api/questions` adds `memory`: `approved`, `pending`, `in_prompt`,
+`reuses`, `weights_frozen=true`, `learns_on=approve`. The payload has counts
+only, not the answer text.
+
+### Dependencies
+
+Same SQLite store and Ollama prompt path as answer retrieval. No new package.
+
+### Functional flow
+
+```mermaid
+flowchart TD
+  A[Operator approves a pending answer] --> B[SQLite approved_value]
+  B --> C[compile_standing_memory]
+  C --> D[Next leftover Easy Apply field]
+  D --> E[Matched approved_answers for this form]
+  D --> F[Standing memory: 8 newest plus highest reuse]
+  E --> G[Ollama prompt]
+  F --> G
+  G --> H[Grounded JSON answer]
+  H --> I{Successful apply used an approved answer?}
+  I -->|yes| J[reuse_count increments]
+  J --> C
+  I -->|no| K[LLM proposal stays pending until the next approval]
+```
+
+### Failure paths
+
+- No approved rows: `standing_memory` is an empty list. Fill order is unchanged.
+- SQLite busy or missing: the slice is omitted. Matched retrieval is still attempted.
+- A pending row is never copied into the prompt, including seed questions.
+
+### Security considerations
+
+Only approved values are compiled. Sensitive proposals stay out until you
+approve them. The slice stays in the local Ollama prompt. Cookies and passwords
+are not added. `memory` on the Questions API returns counts, not answer text.
+
+### Performance considerations
+
+The compiler reads the existing approved pool (capped at 500) and keeps 16
+short rows. It does not call Ollama and does not rewrite the model. A new
+approval is visible on the next `answer_unanswered` call with no rebuild job.
 
 ## Screening question memory
 
@@ -677,12 +755,17 @@ Retrieve-then-generate:
    Yes/No. Sponsorship is never taken from a work-authorization row.
 4. Only that compact slice (default 12) is injected as `approved_answers` with
    `source_id` and optional interpolation `note`. `applicant_facts["approved_answers"]`
-   carries the same slice, never the whole history.
-5. First-pass prompt: use `approved_answers` when present; interpolate related
-   skill years; summarize short text from resume snippets; omit sensitive facts
-   that are not in sources. Second pass (required non-sensitive leftovers only):
-   infer only from `applicant_facts` and `approved_answers`; omit only if no
-   evidence. Return `confidence` and `source_ids`. Existing `q0` question ids stay.
+   carries the same slice, never the whole history. A separate `standing_memory`
+   slice (default 16: 8 newest approvals, then highest reuse) is always added so
+   a confirmed answer can inform a differently worded question. Rows already in
+   `approved_answers` are left out of `standing_memory`.
+5. First-pass prompt: use `approved_answers` when present; use `standing_memory`
+   for similar new questions; a `corrected=true` row replaces an earlier guess;
+   interpolate related skill years; summarize short text from resume snippets;
+   omit sensitive facts that are not in sources. Second pass (required
+   non-sensitive leftovers only): infer only from `applicant_facts`,
+   `approved_answers`, and `standing_memory`; omit only if no evidence. Return
+   `confidence` and `source_ids`. Existing `q0` question ids stay.
 6. Typed LLM values are tagged `_llm_value` and upserted at the end of
    `fillKnownFields` as `source=llm`, `approval_status=pending`. Email/phone
    `proposed_value` is redacted. Sponsorship, authorization, salary, disability,
@@ -691,7 +774,9 @@ Retrieve-then-generate:
    exact-mapped, `reuse_count` increments. LLM proposals stay pending.
 
 How to grow it: approve pending rows (captured or seeded) from the dashboard.
-The next matching form retrieves those rows automatically.
+The next form retrieves an exact or near match immediately, and also receives
+that approval inside `standing_memory` even when the wording differs. A
+successful reuse raises `reuse_count`, which ranks that answer higher next time.
 
 ## Failure paths
 
@@ -707,9 +792,10 @@ The next matching form retrieves those rows automatically.
 - The model returns an unknown question ID, a non-numeric value for a number field,
   or a value outside a select/radio option list: that answer is discarded.
 - The model omits a question or returns an essay longer than 400 characters: that field
-  is left empty. Required **non-sensitive** leftovers get a second infer pass, then a
-  conservative mapped-skill fallback. Required **sensitive** leftovers skip the job as
-  `needs_review` (`Skipped sensitive unanswered`).
+  is left empty. There is no second generate on that page. A conservative mapped-skill
+  fallback may still fill a named skill year. If a required field is still empty, the
+  job is skipped as `needs_review`. A failed generate does not click Next. Sensitive
+  leftovers also log `Skipped sensitive unanswered`.
 - Fit JSON is invalid: the gate is skipped and Easy Apply may still run.
 - Closed shadow roots are walked with WebDriver `element.shadow_root`. A vision model plus
   screenshot remains a fallback when a nested closed tree still cannot be serialized.
@@ -778,6 +864,8 @@ generate stays 90s on its own client. Regression: `pytest tests -q`.
 1. Install Ollama from https://ollama.com/download once.
 2. Open `Start-Dashboard.cmd` and click **Start run**. That starts `ollama serve` and
    pulls `llama3.2` if it is missing. You do not need `Start-Ollama.cmd`.
+   **Stop Ollama** stops the server even if the tray app started it. A finished
+   apply run stops Ollama on its own.
 3. The header LLM chip should say ready. `linkedin-easy-apply --check` is optional.
 4. On **Questions**, optionally click **Generate seed questions**, then approve
    answers you want in RAG memory.

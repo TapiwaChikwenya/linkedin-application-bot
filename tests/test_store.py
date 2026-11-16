@@ -67,6 +67,16 @@ def test_store_round_trip(tmp_path):
     store.close()
 
 
+def test_crashed_run_remembers_the_last_job(tmp_path):
+    store = Store(str(tmp_path / "assistant.sqlite"))
+    run_id = store.start_run("run-crash")
+    store.set_resume_job(run_id, "4487819341")
+    assert store.crashed_resume_job_id() == ""
+    store.finish_run(run_id, "crashed")
+    assert store.crashed_resume_job_id() == "4487819341"
+    store.close()
+
+
 def test_normalize_question_key():
     assert normalize_question_key("  Years of  SQL? ") == normalize_question_key("years of SQL?")
 

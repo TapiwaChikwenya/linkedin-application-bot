@@ -54,7 +54,8 @@ class JobFitResult:
 
     def log_line(self) -> str:
         if self.needs_description and not self.ready:
-            return "Job fit llama deferred: snippet too short"
+            detail = self.reason or "snippet too short"
+            return "Job fit llama deferred: " + detail
         if not self.ready:
             detail = self.reason or "Ollama not ready"
             return "Job fit llama skipped: " + detail
@@ -318,12 +319,13 @@ def evaluate_listing_fit(
     """
     threshold = fit_threshold(config_module)
     compact_snippet = compact_text(snippet, SNIPPET_LIMIT)
-    if source == "card" and not snippet_is_usable(compact_snippet):
+    if source in {"card", "selector_miss"} and not snippet_is_usable(compact_snippet):
+        reason = "description selector miss" if source == "selector_miss" else "snippet too short"
         return JobFitResult(
             ready=False,
             fit=None,
             decision="apply",
-            reason="snippet too short",
+            reason=reason,
             source=source,
             skip_job=False,
             needs_description=True,

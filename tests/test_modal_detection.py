@@ -342,6 +342,40 @@ def test_find_container_uses_webdriver_for_closed_interop_shadow_root():
     assert bot.findApplicationContainer() is dialog
 
 
+def test_find_container_skips_interop_chrome_for_light_dom_dialog():
+    decoy = FakeElement(tag="div", text="Messaging", attrs={"class": "msg-overlay"})
+    host = FakeElement(
+        tag="div",
+        attrs={"id": "interop-outlet", "data-testid": "interop-shadowdom"},
+        shadow_children=[decoy],
+    )
+    next_button = FakeElement(tag="button", text="Next")
+    dialog = FakeElement(
+        tag="dialog",
+        attrs={"open": "", "data-testid": "dialog", "role": "dialog"},
+        children=[
+            FakeElement(tag="h2", text="Apply to Confidential"),
+            FakeElement(tag="footer", children=[next_button]),
+        ],
+    )
+
+    class Driver:
+        def execute_script(self, *_args):
+            return None
+
+        def find_elements(self, _by, selector):
+            if "interop-shadowdom" in selector:
+                return [host]
+            if "dialog" in selector:
+                return [dialog]
+            return []
+
+    bot = Linkedin.__new__(Linkedin)
+    bot.driver = Driver()
+    assert bot.findApplicationContainer() is dialog
+    assert bot.findApplicationAction(dialog, ("review", "next")) is next_button
+
+
 def test_find_container_nested_closed_shadow_without_native_inputs():
     host = _fixture_closed_modal(with_dialog_role=False, native_inputs=False)
     carousel = FakeElement(

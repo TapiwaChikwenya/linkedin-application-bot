@@ -6,6 +6,7 @@ from linkedin_easy_apply.job_card import (
     APPLY_KIND_MISSING,
     SKIP_ALREADY_APPLIED,
     SKIP_NO_EASY_APPLY,
+    SKIP_NO_JOB_ID,
     SKIP_TITLE_FILTER,
     SKIP_UNKNOWN_CARD,
     SKIP_WORKPLACE,
@@ -17,6 +18,7 @@ from linkedin_easy_apply.job_card import (
     parse_aria_label,
     parse_search_card,
     parse_search_cards,
+    parse_semantic_card,
     should_skip_workplace,
 )
 
@@ -82,6 +84,16 @@ def test_list_side_matching_does_not_open_junk(monkeypatch):
     assert card_skip_decision(by_id["4461000008"]) == ("skipped_filter", SKIP_TITLE_FILTER)
     assert card_skip_decision(by_id["4461000009"]) == ("skipped_filter", SKIP_UNKNOWN_CARD)
     assert card_skip_decision(by_id["4461000011"])[0] == "failed"
+
+
+def test_recorded_failed_and_fit_jobs_are_not_reopened():
+    failed = SearchCard(job_id="1", title="Engineer", company="Acme", apply_kind="easy_apply")
+    assert card_skip_decision(failed, stored_status="failed") == (
+        "failed",
+        "Already recorded as failed",
+    )
+    fit = SearchCard(job_id="2", title="Engineer", company="Acme", apply_kind="easy_apply")
+    assert card_skip_decision(fit, stored_status="skipped_fit")[0] == "skipped_fit"
 
 
 def test_store_applied_skips_without_opening_matching_title(monkeypatch):
@@ -267,3 +279,191 @@ def test_inspect_search_card_skips_intern_without_opening(monkeypatch):
     card, skip = bot.inspect_search_card(_FakeOffer(intern_html, "4461000002"))
     assert card.title == "Data Engineer Intern"
     assert skip == ("skipped_filter", SKIP_TITLE_FILTER)
+
+
+def test_semantic_card_reads_title_company_location_and_easy_apply():
+    card = parse_semantic_card(
+        [
+            "Selected, Sr. Data Engineer I (Verified job) Sr. Data Engineer I",
+            "iHerb",
+            "United States (Remote)",
+            "Viewed",
+            "·",
+            "Easy Apply",
+        ],
+        job_id="4440054893",
+    )
+    assert card.title == "Sr. Data Engineer I"
+    doubled = parse_semantic_card(
+        ["Selected, Data Engineer Data Engineer", "Temu", "United States (Remote)", "Easy Apply"],
+        job_id="4475913505",
+    )
+    assert doubled.title == "Data Engineer"
+    assert doubled.company == "Temu"
+    assert card.company == "iHerb"
+    assert card.location == "United States (Remote)"
+    assert card.apply_kind == APPLY_KIND_EASY
+    assert card.job_id == "4440054893"
+    assert card.source == "semantic"
+    assert card.snippet == ""
+    assert card_skip_decision(card) is None
+
+
+def test_semantic_title_filter_runs_without_a_job_id(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "blackListTitles", ["intern"])
+    monkeypatch.setattr(config, "onlyApplyTitles", ["data engineer"])
+    monkeypatch.setattr(config, "blacklist", [])
+    monkeypatch.setattr(config, "onlyApply", [""])
+    monkeypatch.setattr(config, "remote", ["Remote", "Hybrid"])
+    card = parse_semantic_card(
+        [
+            "Data Engineer Intern (Verified job) Data Engineer Intern",
+            "Acme",
+            "United States (Remote)",
+            "Easy Apply",
+        ]
+    )
+    assert card.job_id == ""
+    assert card_skip_decision(card) == ("skipped_filter", SKIP_TITLE_FILTER)
+
+
+def test_prepare_semantic_card_clicks_only_eligible_cards(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "blackListTitles", ["intern"])
+    monkeypatch.setattr(config, "onlyApplyTitles", ["data engineer"])
+    monkeypatch.setattr(config, "blacklist", [])
+    monkeypatch.setattr(config, "onlyApply", [""])
+    monkeypatch.setattr(config, "remote", ["Remote", "Hybrid"])
+
+    class _UrlDriver:
+        def __init__(self):
+            self.url = "https://www.linkedin.com/jobs/search-results/?currentJobId=111"
+            self.clicks = []
+
+        def execute_script(self, _script, *args):
+            self.clicks.append(args)
+            self.url = "https://www.linkedin.com/jobs/search-results/?currentJobId=4469337649"
+            return "clicked"
+
+        @property
+        def current_url(self):
+            return self.url
+
+    bot = Linkedin.__new__(Linkedin)
+    bot.store = None
+    bot.driver = _UrlDriver()
+    intern, intern_skip = bot.prepare_semantic_card(
+        4,
+        {
+            "paras": [
+                "Data Engineer Intern (Verified job) Data Engineer Intern",
+                "Acme",
+                "United States (Remote)",
+                "Easy Apply",
+            ],
+            "job_id": "",
+        },
+    )
+    assert intern.title == "Data Engineer Intern"
+    assert intern_skip == ("skipped_filter", SKIP_TITLE_FILTER)
+    assert bot.driver.clicks == []
+
+    selected, selected_skip = bot.prepare_semantic_card(
+        0,
+        {
+            "paras": [
+                "Selected, Senior Data Engineer (Verified job) Senior Data Engineer",
+                "Quantiphi",
+                "United States (Remote)",
+                "Easy Apply",
+            ],
+            "job_id": "4440054893",
+        },
+    )
+    assert selected_skip is None
+    assert selected.job_id == "4440054893"
+    assert bot.driver.clicks == []
+
+    opened, opened_skip = bot.prepare_semantic_card(
+        1,
+        {
+            "paras": [
+                "Senior Data Engineer (Verified job) Senior Data Engineer",
+                "Quantiphi",
+                "United States (Remote)",
+                "Easy Apply",
+            ],
+            "job_id": "",
+        },
+    )
+    assert opened_skip is None
+    assert opened.job_id == "4469337649"
+    assert bot.driver.clicks == [(1, "")]
+
+
+def test_prepare_semantic_card_skips_when_click_does_not_reveal_id(monkeypatch):
+    import config
+    import linkedin
+
+    monkeypatch.setattr(config, "blackListTitles", [])
+    monkeypatch.setattr(config, "onlyApplyTitles", ["data engineer"])
+    monkeypatch.setattr(config, "blacklist", [])
+    monkeypatch.setattr(config, "onlyApply", [""])
+    monkeypatch.setattr(config, "remote", ["Remote", "Hybrid"])
+    clock = iter([0, 0, 10])
+    monkeypatch.setattr(linkedin.time, "time", lambda: next(clock))
+    monkeypatch.setattr(linkedin.time, "sleep", lambda _seconds: None)
+
+    class _StuckDriver:
+        current_url = "https://www.linkedin.com/jobs/search-results/?currentJobId=111"
+
+        def execute_script(self, *_args):
+            return "clicked"
+
+    bot = Linkedin.__new__(Linkedin)
+    bot.store = None
+    bot.driver = _StuckDriver()
+    card, skip = bot.prepare_semantic_card(
+        2,
+        {
+            "paras": [
+                "Senior Data Engineer (Verified job) Senior Data Engineer",
+                "Quantiphi",
+                "United States (Remote)",
+                "Easy Apply",
+            ],
+            "job_id": "",
+        },
+    )
+    assert card.job_id == ""
+    assert skip == ("skipped_filter", SKIP_NO_JOB_ID)
+
+
+def test_semantic_page_signature_keeps_same_title_at_different_companies():
+    first = [
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "iHerb"]},
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "Quantiphi"]},
+    ]
+    second = [
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "OtherCo"]},
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "Quantiphi"]},
+    ]
+    repeated = [
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "iHerb"]},
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "Quantiphi"]},
+    ]
+    assert Linkedin._semantic_page_signature(first) != Linkedin._semantic_page_signature(second)
+    assert Linkedin._semantic_page_signature(first) == Linkedin._semantic_page_signature(repeated)
+    selected_moved = [
+        {"paras": ["Senior Data Engineer (Verified job) Senior Data Engineer", "iHerb"]},
+        {
+            "paras": [
+                "Selected, Senior Data Engineer (Verified job) Senior Data Engineer",
+                "Quantiphi",
+            ]
+        },
+    ]
+    assert Linkedin._semantic_page_signature(first) == Linkedin._semantic_page_signature(selected_moved)

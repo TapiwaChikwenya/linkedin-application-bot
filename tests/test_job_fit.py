@@ -324,7 +324,7 @@ def test_unanswered_required_reason_skips_guessing():
     assert unanswered_required_reason([
         {"question": "Phone", "kind": "tel", "value": "555", "required": True},
         {"question": "Favorite color?", "kind": "text", "value": "", "required": True},
-    ]) == ""
+    ]) == "Unanswered required question: Favorite color?"
 
 
 def test_apply_fit_gate_persists_skip_reason(tmp_path):

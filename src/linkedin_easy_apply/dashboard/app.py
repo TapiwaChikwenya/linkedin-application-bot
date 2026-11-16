@@ -113,6 +113,16 @@ def _usable_choice_options(question: str, options: list[str]) -> list[str]:
     return usable
 
 
+def _review_retry_count(store: Store) -> int:
+    import config
+    from linkedin_easy_apply.review_retry import retryable_jobs
+
+    try:
+        return len(retryable_jobs(store, config))
+    except (OSError, TypeError, ValueError, AttributeError):
+        return 0
+
+
 def public_question(row: dict[str, Any]) -> dict[str, Any]:
     proposed = str(row.get("proposed_value") or "")
     approved = str(row.get("approved_value") or "")
@@ -551,12 +561,14 @@ def create_app(
                 "day_cap": day_cap,
             },
             "schedule": schedule,
+            "scheduler": _scheduler_view(),
             "profile_locked": locked,
             "events": events,
             "llm": llm,
             "llm_ready": bool(llm.get("ready")),
             "ollama": ollama_payload,
             "questions": store.question_counts(),
+            "review_retry": _review_retry_count(store),
             "metrics": metrics,
             "last_error": last_error,
             "start_contract": START_CONTRACT,
@@ -625,6 +637,49 @@ def create_app(
         media = "image/png" if path.suffix.lower() == ".png" else "text/html"
         return FileResponse(path, media_type=media)
 
+    def _scheduler_view() -> dict[str, Any]:
+        item = scheduler_holder["item"]
+        if item is None:
+            return {"armed": False, "last_action": "", "last_error": "", "last_reason": ""}
+        return {
+            "armed": bool(item.armed),
+            "last_action": item.last_action,
+            "last_error": item.last_error,
+            "last_reason": item.last_reason,
+        }
+
+    def _stop_worker_and_ollama() -> dict[str, Any]:
+        from linkedin_easy_apply.runlog import event
+
+        result = worker.stop()
+        try:
+            result["ollama"] = ollama.stop()
+        except OSError as exc:
+            log.warning("ollama stop failed: %s", exc.__class__.__name__)
+            result["ollama"] = {"ok": False, "error": exc.__class__.__name__}
+        ollama_result = result.get("ollama") if isinstance(result.get("ollama"), dict) else {}
+        event(
+            "run stopped ok="
+            + str(bool(result.get("ok")))
+            + " ollama="
+            + str(ollama_result.get("message") or ollama_result.get("error") or "")
+        )
+        return result
+
+    def _release_ollama() -> dict[str, Any]:
+        from linkedin_easy_apply.runlog import event
+
+        try:
+            result = ollama.stop()
+        except OSError as exc:
+            log.warning("ollama release failed: %s", exc.__class__.__name__)
+            result = {"ok": False, "error": exc.__class__.__name__}
+        event(
+            "ollama released after run finished: "
+            + str(result.get("message") or result.get("error") or "")
+        )
+        return result
+
     def start_run_job(*, scheduled: bool = False) -> JSONResponse:
         import config
         from linkedin_easy_apply.dashboard.operator import OUTSIDE_SCHEDULE
@@ -632,6 +687,9 @@ def create_app(
         if not start_gate.acquire(blocking=False):
             return fail_start("Start is already in progress.")
         try:
+            from linkedin_easy_apply.runlog import event
+
+            event("start run scheduled=" + str(bool(scheduled)))
             sched = schedule_status(store)
             if sched.get("enabled") and not sched.get("active") and not scheduled:
                 return fail_start(OUTSIDE_SCHEDULE, extra={"schedule": sched})
@@ -668,11 +726,17 @@ def create_app(
 
     @app.post("/api/run/start")
     def api_start() -> JSONResponse:
+        item = scheduler_holder["item"]
+        if item is not None:
+            item.clear_operator_hold()
         return start_run_job(scheduled=False)
 
     @app.post("/api/run/stop")
     def api_stop() -> dict[str, Any]:
-        return worker.stop()
+        item = scheduler_holder["item"]
+        if item is not None:
+            item.note_operator_stop()
+        return _stop_worker_and_ollama()
 
     @app.post("/api/ollama/stop")
     def api_ollama_stop() -> dict[str, Any]:
@@ -712,12 +776,15 @@ def create_app(
             repair_contact_classifications(store)
         except sqlite3.OperationalError as extra:
             log.warning("questions list repair sqlite: %s", extra.__class__.__name__)
+        from linkedin_easy_apply.memory import memory_status
+
         questions = store.list_questions(status=status, query=q, kind=kind, source=source, limit=300)
         return {
             "questions": [public_question(item) for item in questions],
             "counts": store.question_counts(),
             "origins": store.question_origin_counts(),
             "kinds": store.question_kinds(),
+            "memory": memory_status(store),
         }
 
     @app.post("/api/questions/classify-pending")
@@ -784,12 +851,18 @@ def create_app(
 
     from linkedin_easy_apply.dashboard.operator import register_operator_routes
 
+    def _kick_scheduler() -> None:
+        item = scheduler_holder["item"]
+        if item is not None:
+            item.kick()
+
     register_operator_routes(
         app,
         store=store,
         worker=worker,
         ollama=ollama,
         data_dir=data_dir,
+        on_schedule_saved=_kick_scheduler,
     )
 
     def _scheduler_start() -> dict[str, Any]:
@@ -807,8 +880,9 @@ def create_app(
     scheduler = RunScheduler(
         store,
         start_run=_scheduler_start,
-        stop_run=worker.stop,
+        stop_run=_stop_worker_and_ollama,
         is_alive=lambda: bool(worker.status().get("alive")),
+        release_ollama=_release_ollama,
     )
     app.state.scheduler = scheduler
     scheduler_holder["item"] = scheduler
@@ -821,7 +895,15 @@ def create_app(
 def run_dashboard() -> int:
     import uvicorn
 
+    from linkedin_easy_apply.dashboard.bind import prepare_dashboard_port
+
     os.chdir(project_root())
+    ready = prepare_dashboard_port(HOST, PORT)
+    if not ready.get("ok"):
+        print(str(ready.get("error") or "Dashboard port is already in use."))
+        return 3
+    if ready.get("replaced"):
+        print("Stopped the previous dashboard that was still using port " + str(PORT) + ".")
     store = Store(default_store_path())
     imported = import_text_logs(store)
     if imported:
@@ -833,5 +915,18 @@ def run_dashboard() -> int:
     )
     thread.start()
     print(f"Dashboard: http://{HOST}:{PORT}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    except SystemExit as exc:
+        code = exc.code
+        if code in (0, None):
+            return 0
+        print(
+            "Dashboard could not listen on http://"
+            + HOST
+            + ":"
+            + str(PORT)
+            + ". Close any other Easy Apply console and start again."
+        )
+        return code if isinstance(code, int) else 3
     return 0

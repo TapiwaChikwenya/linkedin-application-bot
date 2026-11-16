@@ -8,6 +8,38 @@ import subprocess
 import sys
 from typing import Any
 
+# webdriver-manager treats a cache entry older than one day as missing and
+# re-downloads geckodriver under an exclusive lock. A killed worker leaves that
+# lock behind, and the next Start then waits 60s and crashes. Thirty days keeps
+# a working binary without a download on every launch.
+GECKODRIVER_CACHE_DAYS = 30
+
+
+def release_stale_webdriver_lock(lock_path: str) -> bool:
+    """Delete a webdriver-manager lock left by a killed installer.
+
+    A live installer holds the file open, so unlink fails and the lock stays.
+    A dead installer leaves a file that can be removed.
+    """
+    if not lock_path or not os.path.exists(lock_path):
+        return False
+    try:
+        os.unlink(lock_path)
+    except OSError:
+        return False
+    return True
+
+
+def geckodriver_executable() -> str:
+    """Return a cached geckodriver path, clearing an orphaned download lock first."""
+    from webdriver_manager.core.driver_cache import DriverCacheManager
+    from webdriver_manager.firefox import GeckoDriverManager
+
+    cache = DriverCacheManager(valid_range=GECKODRIVER_CACHE_DAYS)
+    lock_path = cache.get_driver_lock_path("geckodriver", cache.get_os_type())
+    release_stale_webdriver_lock(lock_path)
+    return GeckoDriverManager(cache_manager=cache).install()
+
 
 def firefox_executable() -> str:
     candidates = [

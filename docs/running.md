@@ -71,6 +71,11 @@ flowchart TD
 
 - Missing `.venv` prints install commands and waits for a key.
 - A locked Firefox profile asks the operator to close those windows.
+- Geckodriver is taken from the local webdriver-manager cache for 30 days. If a
+  previous worker was stopped while downloading the driver, the orphaned
+  `.wdm-lock-geckodriver-*` file is removed when nothing still has it open.
+  Otherwise Start waits about a minute and exits with
+  `Timed out waiting for webdriver-manager lock`.
 - A job page without a title is not treated as a filter miss **after the search card
   already matched**. If an in-app apply control is visible, the bot still applies. Cards
   with no readable title (even after aria-label / `job-card-container` fallbacks) are
@@ -80,7 +85,13 @@ flowchart TD
 - LinkedIn often labels the in-app button `Apply` or `LinkedIn Apply`, not `Easy Apply`. The
   worker treats `#jobs-apply-button-id` / `.jobs-apply-button` as Easy Apply unless the page
   says already applied or the click opens an external site.
-- Redesigned forms live below `#interop-outlet[data-testid="interop-shadowdom"]` in a **closed**
+- The current Easy Apply form is a light-DOM `<dialog open data-testid="dialog">`
+  (SDUI), with the footer action as a `<button>` whose visible text is Next,
+  Review, or Submit. `#interop-outlet` is still pierced for older closed-shadow
+  forms, but a visible node in that shadow is used only when it has an
+  application action. Otherwise the worker was binding the messaging shadow and
+  reporting that the modal had no Next/Review/Submit button.
+- Older redesigned forms live below `#interop-outlet[data-testid="interop-shadowdom"]` in a **closed**
   shadow root. `driver.page_source` serializes an empty host. The worker reads `element.shadow_root`
   through WebDriver, recursively pierces nested closed shadows (contact comboboxes), and identifies
   the form by dialog semantics, Apply to / Contact info copy, a progress bar (including 0%), footer
@@ -108,8 +119,10 @@ flowchart TD
   reachable. If Ollama is down, approved SQLite memory and mapped bootstrap answers still
   apply; leftover required questions skip the job. See [llm.md](llm.md) and
   [dashboard.md](dashboard.md).
-- One-click Ollama uses RAM while the model stays loaded. Stop the worker without stopping Ollama
-  if you want the next Start run to skip the cold load. Use Stop Ollama to free memory.
+- One-click Ollama uses RAM while the model stays loaded. Stop run, a finished
+  apply loop, and a closed schedule window all stop Ollama so it does not stay
+  resident. The next Start run launches it again. Stop Ollama does the same thing
+  on its own, including when the tray app started the server.
 
 ## Security considerations
 
@@ -134,6 +147,12 @@ SQLite `operator_settings` overrides the two cap integers when set from
 **Settings → Caps**. `.env` remains the fallback. Daily count is the operator's
 **local calendar date**.
 
+A job left in `needs_review` is opened again on a later run only after that
+question has an approved answer, or a work-history / start-date value exists
+for a date control. Search does not reopen ids already stored as applied,
+skipped for fit, failed, or already applied. If the worker crashes, the next
+Start continues the search at the last job id it had opened.
+
 ## Schedule windows
 
 ### Feature purpose
@@ -144,13 +163,63 @@ inside a daytime band. Empty windows keep **manual Start run only**.
 ### Scope
 
 In scope: Settings **Schedule** chips + start/end, `schedule_windows` JSON,
-`RunScheduler` (default 20s tick) started by `run_dashboard`. Out of scope:
-stopping Ollama when a window closes.
+`RunScheduler` started by `run_dashboard`. The first check is immediate, then
+every 20 seconds. Saving a window re-checks immediately. A crash while the
+window is open starts the worker again. A completed run does not. Header **Stop**
+holds the window until you press **Start run** or the next window opens.
 
 Windows use the machine local timezone (`datetime.now().astimezone()`), not UTC.
 Monday=0. `00:00`–`23:59` is treated as all day. `start == end` disables that
-window. Overnight windows wrap midnight. A closed window stops the **owned
-worker tree only**.
+window. Overnight windows wrap midnight. A closed window stops the owned worker
+and local Ollama.
+
+## Logs
+
+### Feature purpose
+
+Keep a daily record of what the dashboard, scheduler, Ollama sidecar, and worker
+did so a later pass can see why a run did not start or why an application failed.
+
+### Scope
+
+In scope: `data/logs/YYYY-MM-DD.log` (UTF-8, local date) and append-only
+`data/worker.log`. Out of scope: shipping logs off the machine.
+
+### Inputs and outputs
+
+| Input | Output |
+|---|---|
+| Schedule ticks, start, stop, Ollama ensure/stop | `data/logs/YYYY-MM-DD.log` |
+| Worker `print` / job result lines, including characters outside cp1252 | Same daily log, and `data/worker.log` |
+| Passwords in a log line | Replaced with `[redacted]` when present in the environment |
+
+```mermaid
+flowchart TD
+  A[Dashboard or worker process] --> B[configure_logging]
+  B --> C[data/logs/YYYY-MM-DD.log]
+  D[Worker stdout] --> E[data/worker.log append]
+  F[Status lines and job results] --> C
+  F --> E
+  F --> G[data/Applied Jobs DATA - YYYYMMDD.txt]
+```
+
+### Failure paths
+
+- A console code page that cannot encode a job title or the 🥵 result prefix used
+  to skip `writeResults`. Result lines are written to the UTF-8 daily log first.
+- If the log directory cannot be created, the run continues and the console still
+  prints.
+
+### Security considerations
+
+Logs stay under `data/` (gitignored). `redact_secrets` strips known password
+environment values before a line is written. Resume bodies are not copied into
+this log.
+
+### Performance considerations
+
+One append per event. The scheduler does not rewrite the file. Worker stdout is
+appended, not truncated, so a restart does not erase the previous session.
 
 ## Match-first search URLs
 
@@ -226,7 +295,13 @@ apply loop iterates **only** matching cards.
 ### Scope
 
 In scope: reading title, company, location, and Easy Apply / SDUI apply signals from each
-`li[data-occludable-job-id]` card; aria-label and `job-card-container` fallbacks; SQLite
+legacy `li[data-occludable-job-id]` card, and from the semantic `/jobs/search-results/`
+cards LinkedIn now serves when `/jobs/search/` redirects. Semantic cards are
+`div[role=button][componentkey]` paragraphs (title, company, location, Easy Apply).
+The list already carries `data-occludable-job-id`, and that id is kept on filtered
+cards without opening them. A card is clicked for `currentJobId` only when filters
+still need an id the markup does not have. Aria-label and `job-card-container` fallbacks
+still apply to the legacy list. SQLite
 already-applied checks; workplace vs `config.remote`; logging `Skipped before open: …`
 on the card; `list_scan` pacing while reading the list.
 
@@ -258,29 +333,40 @@ are the only ones that call `driver.get` on `/jobs/view/{id}`.
 
 ```mermaid
 flowchart TD
-  A[Search results page] --> B[Scroll card into view]
+  A[Search results page] --> A2{Legacy list present?}
+  A2 -->|yes| B[Scroll li card into view]
+  A2 -->|no| B2[Read semantic card paragraphs]
   B --> C{Job id already applied in store?}
+  B2 --> C2{Filters pass but job id missing?}
+  C2 -->|yes| B3[Click card and read currentJobId]
+  C2 -->|no| C
+  B3 --> C
   C -->|yes| S[Log skip on card]
-  C -->|no| D[Read title/company/location/Easy Apply from card HTML]
-  D --> E{Metadata empty?}
-  E -->|yes| F[aria-label and job-card-container attributes]
-  F --> G{Still no title?}
-  G -->|yes| S
-  E -->|no| H{Title/company filter?}
-  G -->|no| H
+  C -->|no| D[Read title/company/location/Easy Apply]
+  D --> H{Title/company filter?}
   H -->|fail| S
   H -->|pass| W{Workplace allowed?}
   W -->|no| S
-  W -->|yes| I{Easy Apply or SDUI apply on card?}
+  W -->|yes| I{Easy Apply on card?}
   I -->|no| S
   I -->|yes| P[Collect matching cards]
-  S --> A
   P --> J[Open /jobs/view/id for matches only]
 ```
 
 ### Failure paths
 
-- Occluded cards are scrolled into view for up to two seconds. If title is still blank, the card
+- LinkedIn's semantic results page has no legacy list. The worker waits for either the old
+  results subtitle or semantic cards, then reads those cards. A repeated card fingerprint
+  stops pagination when `start=` is ignored. An empty page is an error and records how many
+  semantic and text-matched cards were seen. A login, auth wall, or checkpoint URL stops the
+  run. If a card passes filters but a click does not reveal `currentJobId`, it is skipped as
+  `Semantic card did not expose a job id`.
+- The durable search contract is visible text plus `currentJobId`, not a CSS class. The
+  current layout uses `div[role=button][componentkey]` with `data-display-contents`. If that
+  attribute disappears, cards whose text contains Easy Apply or Applied are still read.
+  The apply control is matched by accessible name (`Easy Apply to this job`), including
+  inside a shadow root, so a renamed `jobs-apply-button` class does not hide it.
+- Occluded legacy cards are scrolled into view for up to two seconds. If title is still blank, the card
   is skipped as unknown. The worker does not open it to discover that it is junk.
 - Title blacklist (`intern`, `staffing`, …) and `onlyApplyTitles` run on the card text, so a
   Data Engineer search does not open Intern or Warehouse titles.

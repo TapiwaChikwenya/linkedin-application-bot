@@ -19,14 +19,18 @@ from linkedin_easy_apply.operator_settings import (
     MAX_SUMMARY_CHARS,
     RESUME_MAX_BYTES,
     SETTING_DAY_CAP,
+    SETTING_EARLIEST_START,
     SETTING_OLLAMA_MODEL,
     SETTING_RESUME_PATH,
     SETTING_RUN_CAP,
     SETTING_SCHEDULE,
     SETTING_SUMMARY,
+    SETTING_WORK_HISTORY,
     is_pdf_bytes,
     normalize_model_name,
+    normalize_start_date,
     normalize_windows,
+    parse_work_history,
     public_operator_settings,
     redact_secrets,
     resolved_ollama_model,
@@ -91,6 +95,7 @@ def register_operator_routes(
     worker: Any,
     ollama: Any,
     data_dir: str,
+    on_schedule_saved: Any | None = None,
 ) -> None:
     @app.get("/api/settings")
     def api_settings() -> dict[str, Any]:
@@ -131,9 +136,19 @@ def register_operator_routes(
                     SETTING_SUMMARY,
                     redact_secrets(str(body.get("applicant_summary") or ""))[:MAX_SUMMARY_CHARS],
                 )
+            if "work_history" in body:
+                entries = parse_work_history(body.get("work_history"))
+                store.set_setting(SETTING_WORK_HISTORY, json.dumps(entries))
+            if "earliest_start_date" in body:
+                store.set_setting(
+                    SETTING_EARLIEST_START,
+                    normalize_start_date(str(body.get("earliest_start_date") or "")),
+                )
             if "schedule_windows" in body or "windows" in body:
                 windows = normalize_windows(body.get("schedule_windows", body.get("windows")))
                 store.set_setting(SETTING_SCHEDULE, json.dumps(windows))
+                if on_schedule_saved is not None:
+                    on_schedule_saved()
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except sqlite3.OperationalError as extra:

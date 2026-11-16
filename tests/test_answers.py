@@ -78,6 +78,7 @@ def test_apply_control_classification():
     assert Linkedin.classifyApplyControl("Apply", class_name="jobs-apply-button") == "easy_apply"
     assert Linkedin.classifyApplyControl("LinkedIn Apply to Acme") == "easy_apply"
     assert Linkedin.classifyApplyControl("Easy Apply") == "easy_apply"
+    assert Linkedin.classifyApplyControl("Easy Apply to this job") == "easy_apply"
     assert Linkedin.classifyApplyControl("", href="https://www.linkedin.com/jobs/view/1?openSDUIApplyFlow=true") == "easy_apply"
     assert Linkedin.classifyApplyControl("Applied") == "already_applied"
     assert Linkedin.classifyApplyControl("You applied on Sep 16") == "already_applied"

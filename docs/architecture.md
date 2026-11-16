@@ -43,9 +43,11 @@ search cards before the job page opens. Search URLs quote keyword phrases and ap
 filters, a local Llama **job-fit gate** scores the search-card snippet (or
 the job description if the snippet is short) and skips junk (`skipped_fit`) when
 fit is below 0.55 or the model says skip. Ollama being down skips the gate, not
-the run. Required **sensitive** fields that still have no grounded answer skip
-that job as `needs_review`. Required non-sensitive leftovers are inferred or
-interpolated from resume facts, related skill years, and approved answers.
+the run. A required field that is still empty after one fill attempt skips
+that job as `needs_review`. A later run retries that job after the question is
+approved or a grounded date is saved. The browser is not held open. Grounded leftovers are inferred or interpolated
+from resume facts, related skill years, and approved answers; blank required
+fields are not submitted.
 The current LinkedIn SDUI modal lives in a closed shadow root on
 `#interop-outlet[data-testid='interop-shadowdom']`. The worker pierces that tree with Selenium
 `element.shadow_root` (JavaScript `el.shadowRoot` is null for closed roots), then walks nested closed
@@ -123,9 +125,16 @@ upload into `data/resumes/` (gitignored), daily/run caps, and local-timezone
 schedule windows. `.env` remains the fallback (`OLLAMA_MODEL`,
 `LINKEDIN_RESUME_PATH`, `LINKEDIN_MAX_APPLICATIONS_PER_*`).
 
-`run_dashboard` starts `RunScheduler` (`enable_scheduler=True`). Empty windows mean
-**manual Start only**. Windows use the machine local timezone. A closed window
-stops the owned worker tree, not Ollama.
+`run_dashboard` starts `RunScheduler` (`enable_scheduler=True`). The first check
+runs as soon as the dashboard is up, then about every 20 seconds. Empty windows
+mean **manual Start only**. Windows use the machine local timezone. An open
+window starts the worker; a crash inside that window starts it again. A finished
+run, or Stop from the header, stays down until the next window or a manual Start.
+Closing the window, finishing the run, or Stop also stops local Ollama, including
+a server the dashboard did not launch.
+
+Daily UTF-8 logs are `data/logs/YYYY-MM-DD.log` (schedule, Ollama, job lines).
+The worker transcript is also appended to `data/worker.log`.
 
 ```mermaid
 flowchart LR
@@ -136,7 +145,7 @@ flowchart LR
   Resolve --> Resume[resume attach]
   Resolve --> LLM[Ollama model name]
   Resolve --> Sched[RunScheduler local tz]
-  Sched --> Dash[Start or Stop owned worker]
+  Sched --> Dash[Start or Stop worker and Ollama]
 ```
 
 Future refactoring should move `linkedin.py`, `config.py`, `constants.py`, and `utils.py` fully beneath the package
