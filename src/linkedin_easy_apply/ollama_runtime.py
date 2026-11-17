@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,13 +24,29 @@ from linkedin_easy_apply.llm import (
     ollama_host,
     ollama_model,
 )
-from linkedin_easy_apply.worker import pid_is_alive, read_pid, write_pid
+from linkedin_easy_apply.runlog import event
+from linkedin_easy_apply.worker import list_processes, pid_is_alive, read_pid, write_pid
 
-TAGS_WAIT_SECONDS = 30.0
+log = logging.getLogger(__name__)
+
+TAGS_WAIT_SECONDS = 90.0
 OLLAMA_DOWNLOAD = "https://ollama.com/download"
+_OLLAMA_EXES = frozenset({"ollama", "ollama.exe", "ollama app.exe"})
+_OLLAMA_IMAGES = ("ollama.exe", "ollama app.exe")
 ProbeFn = Callable[[str, float], dict[str, Any]]
 WhichFn = Callable[[], str]
 PopenFn = Callable[..., subprocess.Popen[bytes]]
+ProcessFn = Callable[[], list[tuple[int, int, str]]]
+KillFn = Callable[[int], None]
+
+
+def _exe_name(name: str) -> str:
+    return str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+
+
+def is_ollama_process(name: str) -> bool:
+    """True for the serve binary and the Windows tray app that keeps it alive."""
+    return _exe_name(name) in _OLLAMA_EXES
 
 
 def find_ollama_executable() -> str:
@@ -86,7 +103,7 @@ def _creation_flags() -> int:
 
 
 class OllamaManager:
-    """Own a local `ollama serve` process started by the dashboard, plus optional pulls."""
+    """Start, probe, and stop local Ollama, including a server this app did not launch."""
 
     def __init__(
         self,
@@ -99,6 +116,9 @@ class OllamaManager:
         which: WhichFn | None = None,
         sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] | None = None,
+        processes: ProcessFn | None = None,
+        killer: KillFn | None = None,
+        image_killer: Callable[[], None] | None = None,
     ):
         self.project_root = project_root
         self.host = (host or "").rstrip("/")
@@ -111,6 +131,9 @@ class OllamaManager:
         self._which = which or find_ollama_executable
         self._sleep = sleep or time.sleep
         self._clock = clock or time.time
+        self._processes = processes or list_processes
+        self._killer = killer
+        self._image_killer = image_killer
         self._serve: subprocess.Popen[bytes] | None = None
         self._pull: subprocess.Popen[bytes] | None = None
         self._pull_model = ""
@@ -333,6 +356,7 @@ class OllamaManager:
                         + OLLAMA_DOWNLOAD
                         + " then Start run again from the dashboard."
                     )
+                event("ollama ensure failed: " + detail, level="error")
                 return self._payload(
                     ok=False,
                     ready=False,
@@ -351,6 +375,16 @@ class OllamaManager:
             detail = "model present"
             ready = True
         clear_status_cache()
+        event(
+            "ollama ensure ok="
+            + str(True)
+            + " ready="
+            + str(ready)
+            + " started="
+            + str(started)
+            + " detail="
+            + detail
+        )
         return self._payload(
             ok=True,
             ready=ready,
@@ -360,33 +394,117 @@ class OllamaManager:
             pid=serve_pid,
         )
 
-    def stop(self) -> dict[str, Any]:
-        """Stop only the Ollama process this dashboard started. Leave a user-owned app alone."""
-        pid = self._owned_pid()
-        if not pid:
-            return {
-                "ok": True,
-                "message": "Ollama was not started by this dashboard.",
-            }
-        try:
-            if sys.platform == "win32":
+    def _kill_pid(self, pid: int) -> None:
+        if self._killer is not None:
+            self._killer(pid)
+            return
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        os.kill(pid, 15)
+
+    def _kill_images(self) -> None:
+        """Last resort when the API is up but the process table did not name it."""
+        if self._image_killer is not None:
+            self._image_killer()
+            return
+        if sys.platform == "win32":
+            for image in _OLLAMA_IMAGES:
                 subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    ["taskkill", "/IM", image, "/T", "/F"],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            else:
-                os.kill(pid, 15)
-        except OSError as exc:
-            return {"ok": False, "error": str(exc)}
+            return
+        subprocess.run(
+            ["pkill", "-x", "ollama"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _ollama_pids(self) -> list[int]:
+        pids: list[int] = []
+        owned = self._owned_pid()
+        if owned:
+            pids.append(owned)
+        pull_pid = read_pid(self.pull_pid_path)
+        if pull_pid and pull_pid not in pids and pid_is_alive(pull_pid):
+            pids.append(pull_pid)
         try:
-            os.remove(self.pid_path)
-        except FileNotFoundError:
-            pass
+            rows = self._processes()
+        except OSError:
+            rows = []
+        for pid, _parent, name in rows:
+            if is_ollama_process(name) and pid not in pids:
+                pids.append(int(pid))
+        return pids
+
+    def _clear_pid_files(self) -> None:
+        for path in (self.pid_path, self.pull_pid_path):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.warning("could not remove %s: %s", path, exc.__class__.__name__)
         self._serve = None
+        self._pull = None
+        self._pull_model = ""
+
+    def stop(self) -> dict[str, Any]:
+        """Stop local Ollama even when the tray app or the operator started it."""
+        pids = self._ollama_pids()
+        host = self._resolved_host()
+        if not pids:
+            probe = self._probe(host, 0.6)
+            if not probe.get("reachable"):
+                self._clear_pid_files()
+                clear_status_cache()
+                event("ollama stop: not running")
+                return {"ok": True, "message": "Ollama is not running.", "stopped": []}
+            try:
+                self._kill_images()
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            self._clear_pid_files()
+            clear_status_cache()
+            probe = self._probe(host, 0.6)
+            if probe.get("reachable"):
+                event("ollama stop failed: still reachable", level="error")
+                return {"ok": False, "error": "Ollama is still reachable after stop.", "stopped": []}
+            event("ollama stop: stopped by image name")
+            return {"ok": True, "message": "Ollama stopped.", "stopped": []}
+        try:
+            for pid in pids:
+                self._kill_pid(pid)
+        except OSError as exc:
+            event("ollama stop failed: " + exc.__class__.__name__, level="error")
+            return {"ok": False, "error": str(exc), "stopped": pids}
+        self._clear_pid_files()
         clear_status_cache()
-        return {"ok": True, "pid": pid}
+        probe = self._probe(host, 0.6)
+        if probe.get("reachable"):
+            try:
+                self._kill_images()
+            except OSError as exc:
+                return {"ok": False, "error": str(exc), "stopped": pids}
+            probe = self._probe(host, 0.6)
+        if probe.get("reachable"):
+            event("ollama stop failed: still reachable pids=" + ",".join(str(pid) for pid in pids), level="error")
+            return {
+                "ok": False,
+                "error": "Ollama is still reachable after stop.",
+                "stopped": pids,
+            }
+        event("ollama stopped pids=" + ",".join(str(pid) for pid in pids))
+        return {"ok": True, "message": "Ollama stopped.", "pid": pids[0], "stopped": pids}
 
 
 __all__ = [
@@ -396,6 +514,7 @@ __all__ = [
     "TAGS_WAIT_SECONDS",
     "OllamaManager",
     "find_ollama_executable",
+    "is_ollama_process",
     "model_is_present",
     "probe_ollama",
 ]

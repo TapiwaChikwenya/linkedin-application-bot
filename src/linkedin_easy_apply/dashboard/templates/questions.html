@@ -5,10 +5,12 @@
     <section class="memory-panel">
       <h2>Memory queue</h2>
       <p class="muted">
-        Captured prompts are classified before they are listed. Ollama reads the
-        newest questions first and decides yes/no versus a written answer.
-        The answer box stays editable: pick a suggestion, or type a different answer.
+        Captured prompts stay pending until you approve them. Approving writes the
+        answer into standing memory. The next application sends that memory to Ollama
+        even when the new question is worded differently. Pending rows are saved here
+        and are not learned until you Approve. Model weights stay frozen.
       </p>
+      <p class="muted" id="learnStatus">Loading learning status…</p>
       <div class="memory-kpis">
         <span>PENDING <b id="kpiPending">0</b></span>
         <span>APPROVED <b id="kpiApproved">0</b></span>
@@ -150,7 +152,7 @@ function kindBadge(row) {
   const label = labels[kind] || kind || "text";
   return `<span class="pill kind-${esc(kind || "text")}">${esc(label)}</span>`;
 }
-function setCounts(counts, origins) {
+function setCounts(counts, origins, memory) {
   const pending = counts.pending || 0;
   const approved = counts.approved || 0;
   const rejected = counts.rejected || 0;
@@ -162,6 +164,14 @@ function setCounts(counts, origins) {
     : "";
   document.getElementById("counts").textContent =
     pending + " pending · " + approved + " approved · " + rejected + " rejected" + originBits;
+  const learn = document.getElementById("learnStatus");
+  if (!learn) return;
+  const learned = memory && memory.in_prompt ? memory.in_prompt : 0;
+  const reuses = memory && memory.reuses ? memory.reuses : 0;
+  learn.textContent =
+    learned + " confirmed answers are sent with every Ollama prompt. " +
+    pending + " pending are not learned until you Approve. " +
+    "Successful reuses (" + reuses + ") rank higher next time. Weights stay frozen.";
 }
 async function loadQuestions() {
   const params = new URLSearchParams({
@@ -185,7 +195,7 @@ async function loadQuestions() {
   kindSelect.innerHTML = `<option value="">all kinds</option>` + kinds.map(kind =>
     `<option value="${esc(kind)}"${kind === currentKind ? " selected" : ""}>${esc(kind)}</option>`
   ).join("");
-  setCounts(data.counts || {}, data.origins || {});
+  setCounts(data.counts || {}, data.origins || {}, data.memory || {});
   const rows = (data.questions || []).filter(row => !skipped.has(String(row.question_id)));
   if (selectedId && !rows.some(row => String(row.question_id) === selectedId)) selectedId = "";
   if (!selectedId && rows[0]) selectedId = String(rows[0].question_id);

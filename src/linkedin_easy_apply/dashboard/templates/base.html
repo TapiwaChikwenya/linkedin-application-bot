@@ -839,10 +839,17 @@
       const schedule = data.schedule || {};
       const schedEl = document.getElementById("schedState");
       if (schedEl) {
-        schedEl.textContent = schedule.enabled
+        const scheduler = data.scheduler || {};
+        let schedLabel = schedule.enabled
           ? (schedule.active ? "open " + (schedule.now || "") : "outside")
           : "manual";
-        schedEl.className = schedule.enabled && !schedule.active ? "warn" : "";
+        const schedNote = scheduler.last_error
+          || (scheduler.last_reason === "stopped by operator" || scheduler.last_reason === "run finished"
+            ? scheduler.last_reason
+            : "");
+        if (schedNote) schedLabel += " · " + schedNote;
+        schedEl.textContent = schedLabel;
+        schedEl.className = (schedule.enabled && !schedule.active) || scheduler.last_error ? "warn" : "";
       }
       const outside = Boolean(schedule.enabled && !schedule.active);
       countUp(document.getElementById("pendingQuestions"), questions.pending ?? 0, "");

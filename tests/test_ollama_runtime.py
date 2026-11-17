@@ -1,4 +1,4 @@
-from linkedin_easy_apply.ollama_runtime import OllamaManager, model_is_present
+from linkedin_easy_apply.ollama_runtime import OllamaManager, is_ollama_process, model_is_present
 
 
 class _FakeProc:
@@ -94,3 +94,42 @@ def test_ensure_reports_missing_binary(tmp_path):
     assert result["ok"] is False
     assert result["ready"] is False
     assert "not installed" in result["detail"].lower() or "download" in result["detail"].lower()
+
+
+def test_is_ollama_process_matches_serve_and_tray():
+    assert is_ollama_process(r"C:\Users\me\AppData\Local\Programs\Ollama\ollama.exe") is True
+    assert is_ollama_process("Ollama App.exe") is True
+    assert is_ollama_process("python.exe") is False
+
+
+def test_stop_kills_ollama_it_did_not_start(tmp_path):
+    killed = []
+
+    manager = OllamaManager(
+        str(tmp_path),
+        host="http://127.0.0.1:11434",
+        model="llama3.2",
+        probe=lambda _host, _timeout=1.0: {"reachable": False, "models": [], "error": ""},
+        processes=lambda: [(4242, 1, "ollama.exe"), (4243, 1, "Ollama App.exe")],
+        killer=lambda pid: killed.append(pid),
+        image_killer=lambda: killed.append("image"),
+    )
+    result = manager.stop()
+    assert result["ok"] is True
+    assert result["message"] == "Ollama stopped."
+    assert killed == [4242, 4243]
+    assert "not started by this dashboard" not in result["message"]
+
+
+def test_stop_reports_when_ollama_is_already_down(tmp_path):
+    manager = OllamaManager(
+        str(tmp_path),
+        host="http://127.0.0.1:11434",
+        model="llama3.2",
+        probe=lambda _host, _timeout=1.0: {"reachable": False, "models": [], "error": ""},
+        processes=list,
+        killer=lambda pid: (_ for _ in ()).throw(AssertionError("should not kill")),
+    )
+    result = manager.stop()
+    assert result["ok"] is True
+    assert result["message"] == "Ollama is not running."
