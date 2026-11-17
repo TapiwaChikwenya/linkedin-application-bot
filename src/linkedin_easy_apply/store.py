@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS runs (
     stopped_at TEXT,
     status TEXT NOT NULL,
     applied_count INTEGER NOT NULL DEFAULT 0,
-    skipped_count INTEGER NOT NULL DEFAULT 0
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    resume_job_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -544,6 +545,7 @@ class Store:
                 if "no such column" not in str(exc).lower():
                     raise
             self._ensure_jobs_schema()
+            self._ensure_runs_schema()
             self._ensure_questions_schema()
             self._ensure_operator_schema()
         self.backfill_job_metrics()
@@ -856,6 +858,28 @@ class Store:
     def _table_columns(self, table: str) -> list[str]:
         rows = self._conn.execute("PRAGMA table_info(" + table + ")").fetchall()
         return [str(row["name"]) for row in rows]
+
+    def _ensure_runs_schema(self) -> None:
+        cols = self._table_columns("runs")
+        if cols and "resume_job_id" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN resume_job_id TEXT")
+
+    def set_resume_job(self, run_id: str, job_id: str) -> None:
+        """Remember the search card in progress so a crashed run can continue there."""
+        if not run_id or not job_id:
+            return
+        self._conn.execute(
+            "UPDATE runs SET resume_job_id = ? WHERE run_id = ?",
+            (str(job_id), str(run_id)),
+        )
+        self._conn.commit()
+
+    def crashed_resume_job_id(self) -> str:
+        """Job id to continue from when the latest run crashed. Empty otherwise."""
+        row = self.current_run()
+        if not row or str(row.get("status") or "") != "crashed":
+            return ""
+        return str(row.get("resume_job_id") or "")
 
     def _ensure_jobs_schema(self) -> None:
         """ALTER additive columns on existing jobs tables, then create indexes.
@@ -1761,6 +1785,91 @@ class Store:
         self._conn.commit()
         return self.get_question(int(existing["id"]))
 
+    def relabel_captured_question(
+        self,
+        question_id: int | str | None,
+        *,
+        raw_question: str,
+        options: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Replace a mis-captured Yes/No radio with the real prompt and choice list.
+
+        LinkedIn stored the visible choice as the question and the prompt as the
+        options. Retrieval matches ``normalized_question``, so the prompt has to
+        become the stored question. An approved value that is only that prompt
+        is cleared back to pending — it was the locked dropdown, not an answer.
+        """
+        existing = self.get_question(question_id) if question_id not in (None, "") else None
+        if existing is None:
+            return None
+        raw = " ".join(str(raw_question or "").split())
+        normalized = normalize_question(raw)
+        if not normalized:
+            return existing
+        kind = str(existing.get("field_kind") or "text").lower() or "text"
+        option_list = [str(option) for option in (options or []) if str(option).strip()][:50]
+        hashed = option_set_hash(kind, option_list)
+        current_id = int(existing["id"])
+        conflict = self._conn.execute(
+            """
+            SELECT id FROM questions
+            WHERE normalized_question = ? AND field_kind = ? AND option_set_hash = ? AND id != ?
+            LIMIT 1
+            """,
+            (normalized, kind, hashed, current_id),
+        ).fetchone()
+        if conflict is not None:
+            merged = self.merge_question_into(current_id, int(conflict["id"]))
+            return self._clear_prompt_approval(merged, normalized)
+        self._conn.execute(
+            """
+            UPDATE questions
+            SET raw_question = ?, normalized_question = ?, options_json = ?, option_set_hash = ?,
+                cleaned_question = ?
+            WHERE id = ?
+            """,
+            (raw, normalized, json.dumps(option_list), hashed, raw, current_id),
+        )
+        self._conn.commit()
+        return self._clear_prompt_approval(self.get_question(current_id), normalized)
+
+    def _clear_prompt_approval(
+        self,
+        row: dict[str, Any] | None,
+        prompt: str,
+    ) -> dict[str, Any] | None:
+        if not row:
+            return row
+        prompt_key = normalize_question(prompt)
+        if not prompt_key:
+            return row
+        approved_key = normalize_question(str(row.get("approved_value") or ""))
+        proposed_key = normalize_question(str(row.get("proposed_value") or ""))
+        clear_approved = bool(approved_key) and approved_key == prompt_key
+        clear_proposed = bool(proposed_key) and proposed_key == prompt_key
+        if not clear_approved and not clear_proposed:
+            return row
+        self._conn.execute(
+            """
+            UPDATE questions
+            SET approved_value = CASE WHEN ? THEN '' ELSE approved_value END,
+                approval_status = CASE
+                    WHEN ? AND approval_status != 'rejected' THEN 'pending'
+                    ELSE approval_status
+                END,
+                proposed_value = CASE WHEN ? THEN '' ELSE proposed_value END
+            WHERE id = ?
+            """,
+            (
+                1 if clear_approved else 0,
+                1 if clear_approved else 0,
+                1 if clear_proposed else 0,
+                int(row["id"]),
+            ),
+        )
+        self._conn.commit()
+        return self.get_question(int(row["id"]))
+
     def find_canonical_by_cluster(
         self,
         cluster_key: str,
@@ -1907,7 +2016,7 @@ class Store:
         rows = self._conn.execute(
             "SELECT * FROM questions WHERE "
             + self._needs_classification_sql(include_heuristic)
-            + " ORDER BY id ASC LIMIT ?",
+            + " ORDER BY id DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
         return [item for item in (self._question_row(row) for row in rows) if item]
@@ -2047,16 +2156,19 @@ def _bind_store_connections() -> None:
         "reject_question",
         "record_question",
         "save_question_classification",
+        "relabel_captured_question",
         "merge_question_into",
         "merge_duplicate_question",
         "set_setting",
         "add_chat_message",
+        "set_resume_job",
     ):
         setattr(Store, name, _store_tx(True)(getattr(Store, name)))
     for name in (
         "count_jobs",
         "current_run",
         "running_run",
+        "crashed_resume_job_id",
         "get_job",
         "list_jobs",
         "list_events",

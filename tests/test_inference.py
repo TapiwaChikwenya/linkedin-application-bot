@@ -100,7 +100,7 @@ def test_integer_years_only_and_never_global_default():
     assert named.interpolated is False
 
 
-def test_answer_unanswered_second_pass_when_first_empty(monkeypatch):
+def test_answer_unanswered_does_not_call_again_when_the_first_omits(monkeypatch):
     from linkedin_easy_apply import llm
 
     prompts: list[str] = []
@@ -124,13 +124,7 @@ def test_answer_unanswered_second_pass_when_first_empty(monkeypatch):
             return FakeResponse({"models": [{"name": "unit-model:latest"}]})
         body = json.loads(request.data.decode("utf-8"))
         prompts.append(str(body.get("prompt") or ""))
-        if len(prompts) == 1:
-            return FakeResponse({"response": json.dumps({"answers": []})})
-        return FakeResponse({
-            "response": json.dumps({
-                "answers": [{"question_id": "q0", "value": "4"}],
-            })
-        })
+        return FakeResponse({"response": json.dumps({"answers": []})})
 
     class Cfg:
         llm_mode = "ollama"
@@ -150,11 +144,8 @@ def test_answer_unanswered_second_pass_when_first_empty(monkeypatch):
         [question],
         config_module=Cfg,
     )
-    assert len(prompts) == 2
-    assert "omit only if there is no evidence" in prompts[1].casefold()
-    assert "infer only from applicant_facts" in prompts[1].casefold()
-    assert answers[0]["value"] == "4"
-    assert answers[0]["inferred"] is True
+    assert len(prompts) == 1
+    assert answers == []
 
 
 def test_answer_unanswered_skips_second_pass_for_sensitive(monkeypatch):

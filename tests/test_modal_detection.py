@@ -279,6 +279,15 @@ def test_linkedin_radio_groups_are_collected_once_by_fieldset():
     assert field_kind_from_attrs(tag="fieldset") == "radio"
 
 
+def test_radio_collector_uses_visible_choice_not_question_aria_label():
+    from linkedin_easy_apply.page_snapshot import COLLECT_JS, RADIO_CHOICE_JS
+
+    assert "function radioChoiceLabel" in COLLECT_JS
+    assert "previousElementSibling" in COLLECT_JS
+    assert 'radio.innerText || radio.getAttribute("aria-label") || radio.value' not in COLLECT_JS
+    assert "return radioChoiceLabel(arguments[0])" in RADIO_CHOICE_JS
+
+
 def test_find_container_uses_shadow_aware_semantic_script_first():
     expected = object()
 
@@ -331,6 +340,40 @@ def test_find_container_uses_webdriver_for_closed_interop_shadow_root():
     bot = Linkedin.__new__(Linkedin)
     bot.driver = Driver()
     assert bot.findApplicationContainer() is dialog
+
+
+def test_find_container_skips_interop_chrome_for_light_dom_dialog():
+    decoy = FakeElement(tag="div", text="Messaging", attrs={"class": "msg-overlay"})
+    host = FakeElement(
+        tag="div",
+        attrs={"id": "interop-outlet", "data-testid": "interop-shadowdom"},
+        shadow_children=[decoy],
+    )
+    next_button = FakeElement(tag="button", text="Next")
+    dialog = FakeElement(
+        tag="dialog",
+        attrs={"open": "", "data-testid": "dialog", "role": "dialog"},
+        children=[
+            FakeElement(tag="h2", text="Apply to Confidential"),
+            FakeElement(tag="footer", children=[next_button]),
+        ],
+    )
+
+    class Driver:
+        def execute_script(self, *_args):
+            return None
+
+        def find_elements(self, _by, selector):
+            if "interop-shadowdom" in selector:
+                return [host]
+            if "dialog" in selector:
+                return [dialog]
+            return []
+
+    bot = Linkedin.__new__(Linkedin)
+    bot.driver = Driver()
+    assert bot.findApplicationContainer() is dialog
+    assert bot.findApplicationAction(dialog, ("review", "next")) is next_button
 
 
 def test_find_container_nested_closed_shadow_without_native_inputs():

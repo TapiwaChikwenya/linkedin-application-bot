@@ -36,6 +36,24 @@ SETTING_SUMMARY = "applicant_summary"
 SETTING_RUN_CAP = "max_applications_per_run"
 SETTING_DAY_CAP = "max_applications_per_day"
 SETTING_SCHEDULE = "schedule_windows"
+SETTING_WORK_HISTORY = "work_history"
+SETTING_EARLIEST_START = "earliest_start_date"
+_MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+_START_DATE_RE = re.compile(r"^[\d./-]{0,20}$")
 
 
 def _in_pytest() -> bool:
@@ -152,6 +170,112 @@ def resolved_resume_path(store: Store | None = None, config_module: Any | None =
     return fallback
 
 
+def canonical_month(value: str) -> str:
+    text = " ".join(str(value or "").split()).casefold().rstrip(".")
+    if not text:
+        return ""
+    for name in _MONTH_NAMES:
+        if text == name or text == name[:3]:
+            return name[:1].upper() + name[1:]
+    raise ValueError("Month must be a month name, for example March")
+
+
+def canonical_year(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if not _YEAR_RE.match(text):
+        raise ValueError("Year must be a four-digit year")
+    return text
+
+
+def parse_work_history(raw: Any) -> list[dict[str, Any]]:
+    """Validate an explicit role list. Empty fields are kept; dates are not invented."""
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("work_history must be a JSON list") from exc
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise TypeError("work_history must be a list")
+    if len(raw) > 12:
+        raise ValueError("work_history supports at most 12 roles")
+    entries: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise TypeError("each work history role must be an object")
+        current = bool(item.get("current"))
+        entry = {
+            "company": " ".join(str(item.get("company") or "").split())[:120],
+            "title": " ".join(str(item.get("title") or "").split())[:120],
+            "start_month": canonical_month(str(item.get("start_month") or "")),
+            "start_year": canonical_year(str(item.get("start_year") or "")),
+            "end_month": "" if current else canonical_month(str(item.get("end_month") or "")),
+            "end_year": "" if current else canonical_year(str(item.get("end_year") or "")),
+            "current": current,
+        }
+        if not any(
+            (
+                entry["company"],
+                entry["title"],
+                entry["start_month"],
+                entry["start_year"],
+                entry["end_month"],
+                entry["end_year"],
+            )
+        ):
+            continue
+        entries.append(entry)
+    return entries
+
+
+def normalize_start_date(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if text and not _START_DATE_RE.match(text):
+        raise ValueError("Earliest start date must look like MM/DD/YYYY")
+    return text[:20]
+
+
+def resolved_work_history(
+    store: Store | None = None,
+    config_module: Any | None = None,
+) -> list[dict[str, Any]]:
+    raw = str(load_operator_settings(store).get(SETTING_WORK_HISTORY) or "").strip()
+    if raw:
+        try:
+            return parse_work_history(raw)
+        except ValueError:
+            return []
+    import config as default_config
+
+    cfg = config_module or default_config
+    configured = getattr(cfg, "work_history", None)
+    if not configured:
+        return []
+    try:
+        return parse_work_history(configured)
+    except ValueError:
+        return []
+
+
+def resolved_earliest_start_date(
+    store: Store | None = None,
+    config_module: Any | None = None,
+) -> str:
+    override = str(load_operator_settings(store).get(SETTING_EARLIEST_START) or "").strip()
+    if override:
+        return override[:20]
+    import config as default_config
+
+    cfg = config_module or default_config
+    return str(getattr(cfg, "earliest_start_date", "") or "").strip()[:20]
+
+
 def resolved_applicant_summary(store: Store | None = None) -> str:
     override = str(load_operator_settings(store).get(SETTING_SUMMARY) or "").strip()
     if override:
@@ -184,7 +308,7 @@ def is_pdf_bytes(data: bytes) -> bool:
 
 def parse_hhmm(value: str) -> time:
     text = str(value or "").strip()
-    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?", text)
     if not match:
         raise ValueError("Time must be HH:MM, for example 09:00")
     return time(int(match.group(1)), int(match.group(2)))
@@ -356,6 +480,10 @@ def apply_operator_overrides(config_module: Any, store: Store | None = None) -> 
         config_module.max_applications_per_run = int(caps["max_per_run"])
     if caps.get("max_per_day") is not None:
         config_module.max_applications_per_day = int(caps["max_per_day"])
+    config_module.work_history = resolved_work_history(store, config_module)
+    start_date = resolved_earliest_start_date(store, config_module)
+    if start_date:
+        config_module.earliest_start_date = start_date
     return payload
 
 
@@ -373,4 +501,8 @@ def public_operator_settings(
         "applicant_summary": resolved_applicant_summary(store=store),
         "quota": caps,
         "schedule": schedule,
+        "work_history": resolved_work_history(store=store, config_module=config_module),
+        "earliest_start_date": resolved_earliest_start_date(
+            store=store, config_module=config_module
+        ),
     }

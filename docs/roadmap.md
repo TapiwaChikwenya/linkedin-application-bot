@@ -28,9 +28,9 @@ employer-specific essays, and raising apply volume.
 | Job fit | Title substring lists | Resume-vs-description score and disqualifiers |
 | Questions | Unknown required fields abort | UI inbox; answer once; reuse the mapping |
 | History | `data/Applied Jobs DATA - YYYYMMDD.txt` | SQLite row per job id with status and artifacts |
-| Control | Dashboard start/stop, Login, live events, search | Needs-review pause still pending |
+| Control | Dashboard start/stop, Login, live events, search | needs_review retries after approval; the browser is not held open |
 | Settings | Console Settings: model picker, resume upload, caps, local-tz schedule | Search keywords still live in `config.py` |
-| Safety | Caps exist; marionette crashes kill the run | Session health + resume from last job id |
+| Safety | Caps exist; a crash records the last search job id | Next Start continues the search from that id |
 
 ## Architecture
 
@@ -126,8 +126,10 @@ A local Llama sidecar is documented in [llm.md](llm.md). Cloud models are out of
 0. SQLite event log and importer for current `.txt` files. **Done.**
 1. Local dashboard with live run and application history. **Done.** See [dashboard documentation](dashboard.md).
 2. Fit scorer and duplicate suppression. **Done for fit scoring.** Local Llama
-   job-fit gate; see [llm.md](llm.md). Duplicate suppression remains list-side.
-3. Needs-review pause/resume.
+   job-fit gate; see [llm.md](llm.md). Stored `applied`, `skipped_fit`, `failed`,
+   and `already_applied` ids are skipped before the job page opens.
+3. Needs-review retry after the operator approves the question. **Done.** The
+   worker does not pause on a live modal.
 4. Settings UI: Ollama picker, resume upload, daily/run caps, local-timezone
    schedule. **Done** for those controls. Search-filter YAML overlay still open.
 5. Flavor: daily briefing, company memory, crash resume, CSV export.

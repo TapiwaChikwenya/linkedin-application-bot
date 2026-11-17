@@ -127,7 +127,8 @@ def test_console_pages_render(tmp_path):
     assert "A approve" in questions.text
     assert "cleaned_question" in questions.text
     assert "answer_shape" in questions.text
-    assert 'inputKinds = ["email", "tel", "text", "number"]' in questions.text
+    assert 'freeKinds = ["email", "tel", "text", "number", "textarea", "date", "unknown"]' in questions.text
+    assert 'placeholder="Type or pick an answer"' in questions.text
     assert "row.cleaned_question || row.question_text" in questions.text
     assert "isPlaceholderOption" in questions.text
     models = client.get("/models")
@@ -565,6 +566,10 @@ def test_questions_api_lists_and_filters(tmp_path):
     assert row["last_job_title"] == "Data Engineer"
     assert row["proposed_value"] == "6"
     assert pending["counts"]["pending"] == 2
+    assert pending["memory"]["pending"] == 2
+    assert pending["memory"]["in_prompt"] == 0
+    assert pending["memory"]["weights_frozen"] is True
+    assert pending["memory"]["learns_on"] == "approve"
     searched = client.get("/api/questions", params={"q": "Adventure"}).json()
     assert searched["questions"][0]["last_job_company"] == "Adventure Works"
     assert searched["questions"][0]["origin"] == "linkedin"
@@ -619,6 +624,49 @@ def test_questions_api_repairs_repeated_email_select(tmp_path, monkeypatch):
     assert listed["prefill"] == "me@example.com"
     assert "[email]" not in (listed.get("options") or [])
     assert listed["seen_count"] >= 9
+
+
+def test_questions_api_repairs_yes_radio_echo_into_typeable_prompt(tmp_path):
+    import json
+
+    from linkedin_easy_apply.question_capture import option_set_hash
+
+    prompt = (
+        "Have you personally designed and implemented a data lake or "
+        "Lakehouse architecture using ADLS Gen2 and Delta Lake?"
+    )
+    client, store = _client(tmp_path)
+    row = store.upsert_question(raw_question="Yes", field_kind="radio", options=[prompt, prompt])
+    assert row is not None
+    with store.connection(write=True) as conn:
+        conn.execute(
+            """
+            UPDATE questions
+            SET raw_question = 'Yes', normalized_question = 'yes', options_json = ?,
+                option_set_hash = ?, cleaned_question = 'Yes', classified_kind = 'select',
+                answer_shape = 'select', classification_status = 'heuristic',
+                approved_value = ?, approval_status = 'approved'
+            WHERE id = ?
+            """,
+            (
+                json.dumps([prompt, prompt]),
+                option_set_hash("radio", [prompt, prompt]),
+                prompt,
+                int(row["id"]),
+            ),
+        )
+    payload = client.get("/api/questions", params={"status": "pending"}).json()
+    listed = payload["questions"][0]
+    assert listed["question_text"] == prompt
+    assert listed["kind"] == "yes_no"
+    assert listed["options"] == ["Yes", "No"]
+    assert listed["prefill"] == ""
+    assert listed["approved_value"] == ""
+    page = client.get("/questions")
+    assert page.status_code == 200
+    assert 'placeholder="Type or pick an answer"' in page.text
+    assert "bootQuestions" in page.text
+    assert "<select data-answer=" not in page.text
 
 
 def test_questions_api_uses_cleaned_email_and_hides_dupes(tmp_path):
@@ -892,6 +940,44 @@ def test_start_waits_for_claimed_worker_pid_not_launcher(tmp_path, monkeypatch):
     assert "src" in captured["env"].get("PYTHONPATH", "")
 
 
+def test_crashed_start_passes_resume_job_id(tmp_path, monkeypatch):
+    import os
+    import time
+
+    import config
+    from linkedin_easy_apply.worker import write_state
+
+    monkeypatch.setattr(config, "firefoxProfileRootDir", "")
+    monkeypatch.setattr("linkedin_easy_apply.dashboard.app.is_profile_locked", lambda _path: False)
+    client, store, worker, _ollama = _harness(tmp_path)
+    crashed = store.start_run("crashed-run")
+    store.set_resume_job(crashed, "4487819341")
+    store.finish_run(crashed, "crashed")
+    captured = {}
+    claimed = os.getpid()
+
+    def fake_popen(command, **kwargs):
+        env = kwargs.get("env") or {}
+        captured["env"] = env
+        write_state(
+            {
+                "pid": claimed,
+                "launcher_pid": 111,
+                "token": env["LINKEDIN_WORKER_TOKEN"],
+                "run_id": env["LINKEDIN_RUN_ID"],
+                "heartbeat": time.time(),
+                "started_at": time.time(),
+            },
+            worker.state_path,
+        )
+        return _FakeProc(111)
+
+    monkeypatch.setattr("linkedin_easy_apply.worker.subprocess.Popen", fake_popen)
+    response = client.post("/api/run/start")
+    assert response.status_code == 200
+    assert captured["env"]["LINKEDIN_RESUME_AFTER_JOB_ID"] == "4487819341"
+
+
 def test_start_uses_project_venv_python(tmp_path, monkeypatch):
     import os
     import sys
@@ -951,7 +1037,7 @@ def test_start_times_out_without_claimed_pid(tmp_path, monkeypatch):
     assert worker.last_error
 
 
-def test_stop_run_does_not_stop_ollama(tmp_path, monkeypatch):
+def test_stop_run_also_stops_ollama(tmp_path, monkeypatch):
     client, store, worker, ollama = _harness(tmp_path)
     run_id = store.start_run("keep-ollama")
     write_state(
@@ -974,10 +1060,11 @@ def test_stop_run_does_not_stop_ollama(tmp_path, monkeypatch):
     monkeypatch.setattr("linkedin_easy_apply.worker.sys.platform", "win32")
     stopped = client.post("/api/run/stop")
     assert stopped.status_code == 200
-    assert ollama.stop_calls == 0
+    assert ollama.stop_calls == 1
+    assert "ollama" in stopped.json()
     ollama_stop = client.post("/api/ollama/stop")
     assert ollama_stop.status_code == 200
-    assert ollama.stop_calls == 1
+    assert ollama.stop_calls == 2
 
 
 def test_status_includes_ollama_questions_and_last_error(tmp_path, monkeypatch):
@@ -994,6 +1081,7 @@ def test_status_includes_ollama_questions_and_last_error(tmp_path, monkeypatch):
     )
     status = client.get("/api/status").json()
     assert "ollama" in status
+    assert "scheduler" in status
     assert "questions" in status
     assert "last_error" in status
     assert status["llm"]["ready"] is True
@@ -1197,6 +1285,23 @@ def test_settings_page_and_caps_persist(tmp_path):
     assert status["quota"]["run_cap"] == 3
     assert "schedule" in status
     assert status["schedule"]["enabled"] is False
+    assert "Work history" in page.text
+    history = client.post(
+        "/api/settings",
+        json={
+            "work_history": [{
+                "company": "Example",
+                "title": "Engineer",
+                "start_month": "March",
+                "start_year": "2019",
+                "current": True,
+            }],
+            "earliest_start_date": "04/01/2026",
+        },
+    )
+    assert history.status_code == 200
+    assert history.json()["work_history"][0]["start_month"] == "March"
+    assert history.json()["earliest_start_date"] == "04/01/2026"
 
 
 def test_active_model_persists_in_settings_store(tmp_path):

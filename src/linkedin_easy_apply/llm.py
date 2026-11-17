@@ -162,6 +162,11 @@ def _compact_prompt_answers(rows: list[Any] | None, limit: int = 12) -> list[dic
         note = str(row.get("note") or "")
         if note:
             item["note"] = note
+        reuse = str(row.get("reuse_count") or "").strip()
+        if reuse:
+            item["reuse_count"] = reuse
+        if str(row.get("corrected") or "").strip().lower() == "true":
+            item["corrected"] = "true"
         compact.append(item)
         if len(compact) >= limit:
             break
@@ -184,6 +189,9 @@ def _retrieve_approved(store: Any | None, questions: list[dict[str, Any]]) -> li
 _FILL_INSTRUCTIONS = (
     "You fill LinkedIn Easy Apply form fields for this applicant.\n"
     "Use approved_answers when present. Copy the approved value for a matching question.\n"
+    "standing_memory holds confirmed answers from earlier reviews. Use it for similar\n"
+    "new questions in the same skill family or yes/no topic. A row with corrected=true\n"
+    "replaces any earlier guess. Pending questions are not in standing_memory.\n"
     "If an approved answer conflicts with applicant_facts, omit that question.\n"
     "Use only applicant_facts, approved_answers, and the visible form text. Do not invent "
     "employers, degrees, salaries, legal status, demographic facts, clearances, sponsorship, "
@@ -211,8 +219,9 @@ _FILL_INSTRUCTIONS = (
 
 _INFERENCE_INSTRUCTIONS = (
     "This is a second pass for required fields the first pass omitted.\n"
-    "Infer only from applicant_facts and approved_answers. Interpolate related skill "
-    "years as integers. Reuse related Yes/No answers in the same family.\n"
+    "Infer only from applicant_facts, approved_answers, and standing_memory. "
+    "Interpolate related skill years as integers. Reuse related Yes/No answers in the same family.\n"
+    "A standing_memory row with corrected=true replaces any earlier guess.\n"
     "Never infer sponsorship from work authorization. Do not invent legal, demographic, "
     "salary, clearance, or sponsorship facts.\n"
     "For short text, summarize only from resume_text and approved snippets (max 400 "
@@ -231,6 +240,7 @@ def _prompt_payload(
     snapshot: str,
     questions: list[dict[str, Any]],
     approved_answers: list[dict[str, Any]] | None = None,
+    standing_memory: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     slim_facts = dict(facts)
     yes_no = slim_facts.get("yes_no_rules") or []
@@ -241,6 +251,7 @@ def _prompt_payload(
     if not retrieved:
         retrieved = _compact_prompt_answers(slim_facts.get("approved_answers"))
     slim_facts["approved_answers"] = retrieved
+    standing = _compact_prompt_answers(standing_memory, limit=16)
     identified_questions = [
         {
             "question_id": f"q{index}",
@@ -256,6 +267,7 @@ def _prompt_payload(
         "visible_form_text": (snapshot or "")[:4000],
         "unanswered_questions": identified_questions,
         "approved_answers": retrieved,
+        "standing_memory": standing,
     }
 
 
@@ -264,8 +276,15 @@ def build_prompt(
     snapshot: str,
     questions: list[dict[str, Any]],
     approved_answers: list[dict[str, Any]] | None = None,
+    standing_memory: list[dict[str, Any]] | None = None,
 ) -> str:
-    payload = _prompt_payload(facts, snapshot, questions, approved_answers=approved_answers)
+    payload = _prompt_payload(
+        facts,
+        snapshot,
+        questions,
+        approved_answers=approved_answers,
+        standing_memory=standing_memory,
+    )
     return _FILL_INSTRUCTIONS + json.dumps(payload, ensure_ascii=True)
 
 
@@ -274,8 +293,15 @@ def build_inference_prompt(
     snapshot: str,
     questions: list[dict[str, Any]],
     approved_answers: list[dict[str, Any]] | None = None,
+    standing_memory: list[dict[str, Any]] | None = None,
 ) -> str:
-    payload = _prompt_payload(facts, snapshot, questions, approved_answers=approved_answers)
+    payload = _prompt_payload(
+        facts,
+        snapshot,
+        questions,
+        approved_answers=approved_answers,
+        standing_memory=standing_memory,
+    )
     return _INFERENCE_INSTRUCTIONS + json.dumps(payload, ensure_ascii=True)
 
 
@@ -436,13 +462,20 @@ class OllamaClient:
         questions: list[dict[str, Any]],
         images: list[str] | None = None,
         approved_answers: list[dict[str, Any]] | None = None,
+        standing_memory: list[dict[str, Any]] | None = None,
         infer: bool = False,
     ) -> list[dict[str, Any]]:
         if not questions:
             return []
         builder = build_inference_prompt if infer else build_prompt
         raw = self.generate(
-            builder(facts, snapshot, questions, approved_answers=approved_answers),
+            builder(
+                facts,
+                snapshot,
+                questions,
+                approved_answers=approved_answers,
+                standing_memory=standing_memory,
+            ),
             images=images,
         )
         return normalize_answers(parse_json_object(raw), questions)
@@ -505,6 +538,16 @@ def chat_complete(
     return {"ok": True, "model": chosen, "message": content, "role": "assistant"}
 
 
+class AnswerRequestError(RuntimeError):
+    """A form-fill generate failed. Not the same as the model returning no answers."""
+
+    def __init__(self, kind: str, elapsed_sec: float, detail: str = "") -> None:
+        self.kind = str(kind or "unreachable")
+        self.elapsed_sec = float(elapsed_sec)
+        self.detail = str(detail or "")
+        super().__init__(self.detail or self.kind)
+
+
 def answer_unanswered(
     facts: dict[str, Any],
     snapshot: str,
@@ -513,46 +556,35 @@ def answer_unanswered(
     config_module: Any | None = None,
     store: Any | None = None,
 ) -> list[dict[str, Any]]:
-    from linkedin_easy_apply.inference import leftover_required_non_sensitive
-
     info = status(config_module)
     if not info.get("ready"):
         return []
+    from linkedin_easy_apply.memory import standing_memory_for_store
+
     approved = _retrieve_approved(store, questions)
+    standing = standing_memory_for_store(
+        store,
+        exclude_ids=[str(item.get("source_id") or "") for item in approved],
+    )
     bundled = dict(facts)
     if approved:
         bundled["approved_answers"] = approved
+    client = OllamaClient(host=str(info["host"]), model=str(info["model"]))
+    started = time.monotonic()
     try:
-        client = OllamaClient(host=str(info["host"]), model=str(info["model"]))
         answers = client.answer_questions(
             bundled,
             snapshot,
             questions,
             images=images,
             approved_answers=approved,
+            standing_memory=standing,
         )
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-        return []
-    leftover = leftover_required_non_sensitive(questions, answers)
-    if not leftover:
-        return answers
-    inferred_approved = _retrieve_approved(store, leftover) or approved
-    if inferred_approved:
-        bundled["approved_answers"] = inferred_approved
-    try:
-        second = client.answer_questions(
-            bundled,
-            snapshot,
-            leftover,
-            images=images,
-            approved_answers=inferred_approved,
-            infer=True,
-        )
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-        return answers
-    for item in second:
-        item["inferred"] = True
-    return answers + second
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        elapsed = time.monotonic() - started
+        kind, detail = classify_generate_exception(exc, timeout_sec=int(client.timeout))
+        raise AnswerRequestError(kind, elapsed, detail) from exc
+    return answers
 
 
 def generate_timeout_message(timeout_sec: int) -> str:

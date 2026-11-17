@@ -86,3 +86,91 @@ def test_scheduler_starts_only_at_window_open(tmp_path):
     closed = scheduler.tick(now=datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc))
     assert closed["action"] == "stop"
     assert calls["stop"] == 1
+
+
+def test_schedule_accepts_time_input_with_seconds():
+    windows = normalize_windows([{"days": [0], "start": "09:00:00", "end": "17:00:00"}])
+    assert windows[0]["start"] == "09:00"
+    assert windows[0]["end"] == "17:00"
+
+
+def _open_scheduler(tmp_path, **extra):
+    store = Store(str(tmp_path / "assistant.sqlite"))
+    store.set_setting(
+        "schedule_windows",
+        '[{"days":[4],"start":"09:00","end":"17:00"}]',
+    )
+    inside = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
+    calls = {"start": 0, "stop": 0, "release": 0}
+    alive = {"value": False}
+    outcome = {"value": ""}
+
+    def start():
+        calls["start"] += 1
+        outcome["value"] = "running"
+        return {"ok": True}
+
+    scheduler = RunScheduler(
+        store,
+        start_run=start,
+        stop_run=lambda: calls.__setitem__("stop", calls["stop"] + 1),
+        is_alive=lambda: alive["value"],
+        clock=lambda: inside,
+        release_ollama=lambda: calls.__setitem__("release", calls["release"] + 1),
+        run_status=lambda: outcome["value"],
+        **extra,
+    )
+    return scheduler, calls, alive, outcome, inside
+
+
+def test_scheduler_retries_after_crash_inside_window(tmp_path):
+    scheduler, calls, alive, outcome, inside = _open_scheduler(tmp_path)
+    assert scheduler.tick(now=inside)["action"] == "start"
+    alive["value"] = False
+    outcome["value"] = "crashed"
+    again = scheduler.tick(now=inside)
+    assert again["action"] == "start"
+    assert calls["start"] == 2
+    assert calls["release"] == 0
+
+
+def test_scheduler_stops_ollama_when_run_finishes_inside_window(tmp_path):
+    scheduler, calls, alive, outcome, inside = _open_scheduler(tmp_path)
+    scheduler.tick(now=inside)
+    alive["value"] = True
+    scheduler.tick(now=inside)
+    alive["value"] = False
+    outcome["value"] = "completed"
+    done = scheduler.tick(now=inside)
+    assert done["reason"] == "run finished"
+    assert calls["start"] == 1
+    assert calls["release"] == 1
+    scheduler.tick(now=inside)
+    assert calls["release"] == 1
+    assert calls["start"] == 1
+
+
+def test_scheduler_does_not_restart_after_operator_stop(tmp_path):
+    scheduler, calls, _alive, _outcome, inside = _open_scheduler(tmp_path)
+    scheduler.tick(now=inside)
+    scheduler.note_operator_stop()
+    held = scheduler.tick(now=inside)
+    assert held["reason"] == "stopped by operator"
+    assert calls["start"] == 1
+    scheduler.clear_operator_hold()
+    resumed = scheduler.tick(now=inside)
+    assert resumed["action"] == "start"
+    assert calls["start"] == 2
+
+
+def test_scheduler_loop_ticks_before_waiting(tmp_path):
+    scheduler, calls, _alive, _outcome, _inside = _open_scheduler(tmp_path)
+
+    def tick(now=None):
+        calls["ticks"] = calls.get("ticks", 0) + 1
+        scheduler.stop()
+        return {"ok": True, "action": "idle"}
+
+    scheduler.tick = tick
+    scheduler._loop()
+    assert calls["ticks"] == 1

@@ -48,6 +48,18 @@
         </div>
       </section>
       <section class="memory-panel">
+        <h2>Work history</h2>
+        <p class="muted">Explicit roles only. The worker does not guess dates from the resume. Current role leaves the end date empty.</p>
+        <div class="toolbar">
+          <label class="muted">Earliest start <input id="startDate" type="text" placeholder="MM/DD/YYYY" style="width:12ch"></label>
+        </div>
+        <textarea id="workHistory" rows="6" spellcheck="false" placeholder='[{"company":"Example","title":"Data Engineer","start_month":"March","start_year":"2019","end_month":"","end_year":"","current":true}]' style="width:100%"></textarea>
+        <div class="toolbar">
+          <button id="saveHistoryBtn" class="btn-ghost" type="button">Save work history</button>
+          <span class="muted" id="historyStatus"></span>
+        </div>
+      </section>
+      <section class="memory-panel">
         <h2>Resume PDF</h2>
         <p class="muted">Saved under data/resumes/ (gitignored). Active path is used for Easy Apply and Llama facts.</p>
         <div class="toolbar">
@@ -149,6 +161,10 @@ async function loadSettings() {
   }
   paintDays();
   renderResumes(settings.resumes || []);
+  const history = document.getElementById("workHistory");
+  const startDate = document.getElementById("startDate");
+  if (history) history.value = JSON.stringify(settings.work_history || [], null, 2);
+  if (startDate) startDate.value = settings.earliest_start_date || "";
   const models = await fetch("/api/models").then(async r => {
     const payload = await r.json().catch(() => ({}));
     payload._http = r.status;
@@ -187,6 +203,20 @@ document.getElementById("pullBtn").onclick = async () => {
     ? ("pulling " + (result.model || model) + " — watch Live ticker")
     : (result.error || "pull failed");
   await refreshHeader();
+};
+document.getElementById("saveHistoryBtn").onclick = async () => {
+  let workHistory = [];
+  try {
+    workHistory = JSON.parse(document.getElementById("workHistory").value || "[]");
+  } catch (error) {
+    document.getElementById("historyStatus").textContent = "work history must be a JSON list";
+    return;
+  }
+  const result = await api("POST", "/api/settings", {
+    work_history: workHistory,
+    earliest_start_date: document.getElementById("startDate").value.trim()
+  });
+  document.getElementById("historyStatus").textContent = result.error || "saved";
 };
 document.getElementById("saveCapsBtn").onclick = async () => {
   const result = await api("POST", "/api/settings", {

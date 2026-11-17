@@ -71,11 +71,14 @@ def validate_configuration() -> list[str]:
 
 
 def _enable_live_logs() -> None:
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-        sys.stderr.reconfigure(line_buffering=True)
-    except (AttributeError, OSError):
-        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except (AttributeError, OSError, ValueError):
+            try:
+                stream.reconfigure(line_buffering=True)
+            except (AttributeError, OSError, ValueError):
+                pass
 
 
 def _print_startup_banner() -> None:
@@ -193,6 +196,9 @@ def _run_question_commands(args: argparse.Namespace) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     _enable_live_logs()
     args = build_parser().parse_args(argv)
+    from linkedin_easy_apply.runlog import configure_logging
+
+    configure_logging(role="dashboard" if args.dashboard else "worker")
     question_status = _run_question_commands(args)
     if question_status is not None:
         return question_status

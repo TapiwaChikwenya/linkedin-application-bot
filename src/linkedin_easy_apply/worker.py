@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,8 @@ def worker_launch_env(project_root: str, base: dict[str, str] | None = None) -> 
         filter(None, [str(root / "src"), str(root), env.get("PYTHONPATH", "")])
     )
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -567,16 +570,23 @@ class WorkerManager:
             self.last_error = error
             return {"ok": False, "error": error}
 
+        resume_after = self.store.crashed_resume_job_id()
         run_id = self.store.start_run()
         token = uuid.uuid4().hex
         env = worker_launch_env(self.project_root)
         env["LINKEDIN_RUN_ID"] = run_id
+        if resume_after:
+            env["LINKEDIN_RESUME_AFTER_JOB_ID"] = resume_after
         env["LINKEDIN_WORKER_TOKEN"] = token
         env["LINKEDIN_WORKER_STATE_PATH"] = self.state_path
         command = [python_exe, "-u", "-m", "linkedin_easy_apply"]
         os.makedirs(os.path.join(self.project_root, "data"), exist_ok=True)
         try:
-            self._log_handle = open(self.log_path, "wb")  # noqa: SIM115
+            self._log_handle = open(self.log_path, "ab", buffering=0)  # noqa: SIM115
+            stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._log_handle.write(
+                ("\n----- worker start " + stamp + " run=" + run_id + " -----\n").encode("utf-8")
+            )
         except OSError:
             self._log_handle = subprocess.DEVNULL
         kwargs: dict[str, Any] = {

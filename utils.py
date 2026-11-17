@@ -1,4 +1,4 @@
-import math,constants,config,re,time
+import math,constants,config,re,sys,time
 from typing import List
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -20,14 +20,40 @@ def browserOptions():
 
     return options
 
+def safe_print(text: str) -> None:
+    """Print without dropping lines the console code page cannot encode."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        payload = (str(text) + "\n").encode(encoding, errors="replace")
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is None:
+            return
+        buffer.write(payload)
+        buffer.flush()
+
+
+def _record(text: str, level: str = "info") -> None:
+    try:
+        from linkedin_easy_apply.runlog import event
+
+        event(str(text), level=level)
+    except Exception:  # noqa: BLE001 - console output must survive a log failure
+        return
+
+
 def prRed(prt):
-    print(f"\033[91m{prt}\033[00m")
+    _record(str(prt), "error")
+    safe_print(f"\033[91m{prt}\033[00m")
 
 def prGreen(prt):
-    print(f"\033[92m{prt}\033[00m")
+    _record(str(prt), "info")
+    safe_print(f"\033[92m{prt}\033[00m")
 
 def prYellow(prt):
-    print(f"\033[93m{prt}\033[00m")
+    _record(str(prt), "info")
+    safe_print(f"\033[93m{prt}\033[00m")
 
 def getUrlDataFile():
     urlData = ""
@@ -40,19 +66,26 @@ def getUrlDataFile():
     return urlData
 
 def jobsToPages(numOfJobs: str) -> int:
-  number_of_pages = 1
+    """Turn a LinkedIn results label into a page count.
 
-  if (' ' in numOfJobs):
-    spaceIndex = numOfJobs.index(' ')
-    totalJobs = (numOfJobs[0:spaceIndex])
-    totalJobs_int = int(totalJobs.replace(',', ''))
-    number_of_pages = math.ceil(totalJobs_int/constants.jobsPerPage)
-    if (number_of_pages > 40 ): number_of_pages = 40
+    Accepts legacy labels such as ``1,234 jobs`` and semantic labels such as
+    ``99+ results``. A bare integer is still treated as an already-computed
+    page count.
+    """
+    text = (numOfJobs or "").strip()
+    if " " not in text:
+        return int(text)
 
-  else:
-      number_of_pages = int(numOfJobs)
-
-  return number_of_pages
+    token = text.split(" ", 1)[0].replace(",", "")
+    digits = token.rstrip("+")
+    if not digits.isdigit():
+        raise ValueError(numOfJobs)
+    total_jobs = int(digits)
+    per_page = constants.jobsPerPage or 1
+    number_of_pages = math.ceil(total_jobs / per_page)
+    if number_of_pages > 40:
+        return 40
+    return number_of_pages
 
 def clean_search_term(text: str) -> str:
     return " ".join((text or "").replace('"', " ").split())

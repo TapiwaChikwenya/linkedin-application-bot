@@ -69,7 +69,7 @@ flowchart TD
   I --> J[Ask local Llama only for remaining fields]
   J --> K{Submit, next, or still-unknown required field}
   K -->|Submit| L[Write audit log]
-  K -->|Unknown sensitive required| M[Skip job needs_review]
+  K -->|Required field still empty| M[Skip job needs_review]
 ```
 
 ## Failure paths
@@ -79,8 +79,11 @@ flowchart TD
 - CAPTCHA, 2FA, or a security checkpoint must be finished in the visible browser window.
 - Unknown required screening questions are not invented as essays. Approved memory,
   related interpolation, and mapped config fill first. A local Ollama model may infer
-  leftover short fields from facts (second pass for required non-sensitive omissions).
-  If a required **sensitive** field is still empty, that job is skipped (`needs_review`).
+  leftover short fields from facts (one generate per page; an omission is not retried).
+  If a required field is still empty after that attempt, including a sensitive
+  question or a blank URL, date, or month/year with no grounded answer, that
+  job is skipped (`needs_review`) and Next is not clicked again. An Ollama
+  timeout is a request failure, not an empty answer.
   A separate Llama job-fit gate can skip junk listings (`skipped_fit`) when Ollama is
   ready; if Ollama is down, the model is missing, or generate times out (180s), the gate
   is skipped and Easy Apply still runs.
@@ -161,8 +164,8 @@ project root).
 
 - Same `assistant.sqlite` as jobs/questions
 - Dashboard **Settings** (`/models`) to write keys
-- `linkedin_easy_apply.scheduler.RunScheduler` (20s tick; started by
-  `run_dashboard` with `enable_scheduler=True`)
+- `linkedin_easy_apply.scheduler.RunScheduler` (immediate check, then 20s tick;
+  started by `run_dashboard` with `enable_scheduler=True`)
 
 ### Functional flow
 
@@ -174,7 +177,7 @@ flowchart TD
   C -->|no| E[.env or config.py]
   F[Empty schedule_windows] --> G[Manual Start only]
   H[Non-empty windows] --> I[RunScheduler local time]
-  I --> J[Start or Stop owned worker]
+  I --> J[Start or Stop worker and Ollama]
 ```
 
 ### Failure paths

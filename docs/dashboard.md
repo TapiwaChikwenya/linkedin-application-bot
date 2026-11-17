@@ -19,8 +19,9 @@ Firefox profile flow as `--login`), Stop of the owned worker tree, optional Stop
 Ollama, localhost-only HTTP, questions review JSON API, and Settings APIs for
 model / resume / caps / local-timezone schedule.
 
-Out of scope: fine-tuning Llama, submitting answers to LinkedIn from the
-dashboard, and stopping a user-owned Ollama app the dashboard did not start.
+Out of scope: fine-tuning Llama and submitting answers to LinkedIn from the
+dashboard. Stop Ollama stops the local server even when this dashboard did not
+start it.
 `Start-Bot.cmd`, `Start-Ollama.cmd`, and `Login-LinkedIn.cmd` are optional
 fallbacks, not part of the daily path. Job-fit scoring runs in the worker; Live
 exposes `last_fit` from `/api/status` without a dashboard restyle.
@@ -33,8 +34,8 @@ exposes `last_fit` from `/api/status` without a dashboard restyle.
 | `linkedin-easy-apply --dashboard` | Same, after the venv is active |
 | **Start run** | Starts local Ollama if needed (serve + pull `llama3.2`), then the Easy Apply worker |
 | **Login** | Opens the bot Firefox profile at LinkedIn login. Close Firefox before Start run |
-| **Stop** | Terminates the owned worker/python/geckodriver tree only |
-| **Stop Ollama** | Stops the `ollama serve` process this dashboard started |
+| **Stop** | Terminates the owned worker tree and local Ollama |
+| **Stop Ollama** | Stops local `ollama.exe` / the Ollama tray app, even if this dashboard did not start it |
 | `GET /api/questions` | List captured Easy Apply questions; **repairs live SQLite** so email is not a select of `[email]` |
 | `POST /api/questions/generate-seeds` | Insert pending seed questions; returns `{inserted, skipped, candidates}` |
 | `POST /api/questions/approve` | Persist `approved_value` and status `approved` |
@@ -67,7 +68,7 @@ flowchart TD
   D -->|Start run| F{Already running or profile locked?}
   F -->|yes| E[HTTP 409 plus error strip]
   F -->|no| G{Ollama /api/tags?}
-  G -->|no| H[Start ollama serve and wait up to 30s]
+  G -->|no| H[Start ollama serve and wait up to 90s]
   H --> I{llama3.2 present?}
   G -->|yes| I
   I -->|no| J[Background ollama pull llama3.2]
@@ -243,6 +244,12 @@ Each row shows cleaned question text (repeated labels collapsed, not concatenate
 raw capture), options, a kind badge (email, years,
 yes/no, text, …), source, `seen_count`, last job title/company, proposed value,
 an answer field, Approve, Reject, and client-side Skip.
+The answer field is always editable. Yes/No and other short choices are
+suggestions in a typeable box, not a locked dropdown. Ollama classifies the
+newest pending prompts before the table renders (`POST /api/questions/classify-pending`);
+heuristics still repair email, phone, years, and radio prompts whose options
+are a copy of the question if Llama is down. Refresh Questions after a capture
+to see the repaired prompt and type over the suggestion.
 Email is never a `<select>` of `[email]`. Heuristics treat LinkedIn placeholder
 options (`Select an option`, `[email]`, `email addresses`) as kind `email`,
 cleaned title **Email**, `answer_shape=text`. The answer control is
@@ -250,10 +257,14 @@ cleaned title **Email**, `answer_shape=text`. The answer control is
 on the live SQLite file so already-stored select rows are rewritten before the
 list returns. **Refresh Questions** after a worker capture or after upgrading
 the dashboard to see the repaired title and text input. Phone follows the same
-placeholder path (`tel`). The page also calls `POST /api/questions/classify-pending`
-once after load so Llama can polish wording; heuristics already ran on capture.
+placeholder path (`tel`). The page calls `POST /api/questions/classify-pending`
+before the first table paint so Llama can correct kind; heuristics already ran
+on capture and again on that request.
 Skip only hides the row in this browser session. There is no bulk-approve.
 Seed rows stay pending until you approve them; that is how RAG memory grows.
+`GET /api/questions` includes `memory` counts: how many approved answers are in
+the next Ollama prompt (`in_prompt`), how many pending rows are not learned yet,
+and total `reuses`. Approving a row is the learning step. Weights stay frozen.
 The **Generate seed questions** control is the highlighted panel at the top of
 `/questions` (`#seeds`). Empty pending tables link back to that panel.
 
@@ -592,8 +603,11 @@ pending-question count.
   running. A run is crashed only when the owned worker is gone, its heartbeat is stale,
   and no owned python/geckodriver descendant remains.
 - Stop terminates the owned worker PID (`taskkill /T` on Windows). It does not scan for
-  or terminate unrelated Firefox processes, and it does not stop Ollama.
-- Stop Ollama only kills the `ollama serve` PID recorded in `data/ollama.pid`.
+  or terminate unrelated Firefox processes. It does stop local Ollama.
+- Stop Ollama stops `ollama.exe` and `Ollama App.exe` whether or not
+  `data/ollama.pid` exists. A finished apply run stops Ollama the same way.
+- Schedule decisions, Ollama start/stop, and job result lines are appended to
+  `data/logs/YYYY-MM-DD.log`. Worker stdout is appended to `data/worker.log`.
 - Artifact URLs only serve `easy_apply_failure_*`, `easy_apply_page_*`, and `job_load_*`.
 - `/api/status` includes `linkedin_easy_apply.llm.status()`, `llm_ready`, Ollama
   process/pull flags and `tokens` when known, `search`, `last_job` / `last_decision`,
@@ -612,6 +626,10 @@ pending-question count.
 
 ## Troubleshooting
 
+- `WinError 10048` / exit code 3 on startup: port 8787 is already taken, usually by a
+  previous dashboard whose console window is gone. The next `Start-Dashboard.cmd`
+  stops that previous dashboard process only (not its worker) and listens again.
+  If the port belongs to a different program, the console says so and leaves it alone.
 - Questions or `/api/questions` returns 404: the dashboard process is still running an
   older `app.py`. Stop only the dashboard Python on port 8787 (do not `taskkill /T` —
   that can take the worker with it), then start `Start-Dashboard.cmd` again.
