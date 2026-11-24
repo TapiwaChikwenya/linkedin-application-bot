@@ -208,6 +208,18 @@ def _is_worker_exe(name: str) -> bool:
     return base.startswith(("python", "geckodriver"))
 
 
+def posix_kill_order(root_pid: int, processes: list[ProcessRow] | None = None) -> list[int]:
+    """Descendants first, then the root.
+
+    On Linux, signaling only the worker leaves Firefox and geckodriver holding
+    the profile lock, so the next Start fails. Windows uses ``taskkill /T``.
+    """
+    if root_pid <= 0:
+        return []
+    descendants = [row[0] for row in reversed(descendant_rows(root_pid, processes))]
+    return descendants + [root_pid]
+
+
 def descendant_rows(root_pid: int, processes: list[ProcessRow] | None = None) -> list[ProcessRow]:
     if root_pid <= 0:
         return []
@@ -718,7 +730,11 @@ class WorkerManager:
                 stderr=subprocess.DEVNULL,
             )
             return
-        os.kill(pid, signal.SIGTERM)
+        for target in posix_kill_order(pid):
+            try:
+                os.kill(target, signal.SIGTERM)
+            except OSError:
+                continue
 
     def _abort_start(self, run_id: str, error: str) -> dict[str, Any]:
         self.last_error = error

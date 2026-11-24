@@ -1236,6 +1236,15 @@ def test_login_reject_cross_origin(tmp_path):
     assert response.status_code == 403
 
 
+def test_run_controls_reject_cross_origin(tmp_path):
+    client, _store = _client(tmp_path)
+    headers = {"Origin": "http://evil.example"}
+    assert client.post("/api/run/start", headers=headers).status_code == 403
+    assert client.post("/api/run/stop", headers=headers).status_code == 403
+    assert client.post("/api/ollama/stop", headers=headers).status_code == 403
+    assert client.delete("/api/resumes/anything.pdf", headers=headers).status_code == 403
+
+
 def test_start_combines_venv_and_ollama_errors(tmp_path, monkeypatch):
     import config
 

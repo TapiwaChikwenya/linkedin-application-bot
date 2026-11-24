@@ -725,21 +725,24 @@ def create_app(
             start_gate.release()
 
     @app.post("/api/run/start")
-    def api_start() -> JSONResponse:
+    def api_start(request: Request) -> JSONResponse:
+        require_same_origin(request)
         item = scheduler_holder["item"]
         if item is not None:
             item.clear_operator_hold()
         return start_run_job(scheduled=False)
 
     @app.post("/api/run/stop")
-    def api_stop() -> dict[str, Any]:
+    def api_stop(request: Request) -> dict[str, Any]:
+        require_same_origin(request)
         item = scheduler_holder["item"]
         if item is not None:
             item.note_operator_stop()
         return _stop_worker_and_ollama()
 
     @app.post("/api/ollama/stop")
-    def api_ollama_stop() -> dict[str, Any]:
+    def api_ollama_stop(request: Request) -> dict[str, Any]:
+        require_same_origin(request)
         return ollama.stop()
 
     @app.post("/api/login")

@@ -340,7 +340,10 @@ def register_operator_routes(
         return {"ok": True, "name": name, "resumes": _list_resumes(store, data_dir)}
 
     @app.delete("/api/resumes/{name}")
-    def api_resume_delete(name: str) -> dict[str, Any]:
+    def api_resume_delete(name: str, request: Request) -> dict[str, Any]:
+        from linkedin_easy_apply.dashboard.app import require_same_origin
+
+        require_same_origin(request)
         filename = safe_resume_name(name)
         path = resume_dir(data_dir) / filename
         if not path.is_file():
