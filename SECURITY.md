@@ -13,3 +13,8 @@ credentials, session cookies, resumes, application answers, screenshots, or save
 - Review `git diff --cached` before every commit.
 
 The project does not bypass CAPTCHA, multifactor authentication, platform limits, or security checks.
+
+LinkedIn's own help pages prohibit third-party software that automates activity on the site.
+This repository does not add stealth, challenge bypasses, or higher apply throughput. Operator
+controls (start, stop, Ollama stop, resume delete) reject cross-origin browser requests so a
+page on another site cannot drive the local console.

@@ -32,8 +32,66 @@ def port_is_open(host: str, port: int) -> bool:
         return False
 
 
-def listening_pids(port: int) -> list[int]:
-    """Return PIDs in LISTENING state for this TCP port. Empty if unknown."""
+def listening_inodes_from_proc(text: str, port: int) -> set[str]:
+    """Inodes in LISTEN state for ``port`` from one ``/proc/net/tcp`` table."""
+    inodes: set[str] = set()
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 10:
+            continue
+        if parts[3].upper() != "0A":
+            continue
+        local = parts[1]
+        try:
+            local_port = int(local.rsplit(":", 1)[1], 16)
+        except (ValueError, IndexError):
+            continue
+        if local_port == int(port):
+            inodes.add(parts[9])
+    return inodes
+
+
+def _posix_listening_pids(port: int) -> list[int]:
+    """PIDs listening on ``port``, from /proc. Linux netstat does not end in a PID."""
+    inodes: set[str] = set()
+    proc_net = "/proc/net"
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(f"{proc_net}/{name}", encoding="utf-8") as handle:
+                inodes.update(listening_inodes_from_proc(handle.read(), port))
+        except OSError:
+            continue
+    if not inodes:
+        return []
+    found: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in entries:
+        if not name.isdigit():
+            continue
+        fd_dir = f"/proc/{name}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            if not target.startswith("socket:[") or not target.endswith("]"):
+                continue
+            if target[8:-1] in inodes:
+                pid = int(name)
+                if pid not in found:
+                    found.append(pid)
+                break
+    return found
+
+
+def _windows_listening_pids(port: int) -> list[int]:
     try:
         completed = subprocess.run(
             ["netstat", "-ano", "-p", "tcp"],
@@ -60,6 +118,13 @@ def listening_pids(port: int) -> list[int]:
         if pid > 0 and pid not in found:
             found.append(pid)
     return found
+
+
+def listening_pids(port: int) -> list[int]:
+    """Return PIDs in LISTENING state for this TCP port. Empty if unknown."""
+    if sys.platform == "win32":
+        return _windows_listening_pids(port)
+    return _posix_listening_pids(port)
 
 
 def process_command_line(pid: int) -> str:
