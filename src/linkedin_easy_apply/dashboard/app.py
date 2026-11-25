@@ -517,7 +517,7 @@ def create_app(
         caps = resolve_application_caps(store=store)
         run_cap = int(caps["max_per_run"])
         day_cap = int(caps["max_per_day"])
-        applied_today = applications_today()
+        applied_today = applications_today(store=store)
         remaining = remaining_applications(applied_this_run, run_cap, day_cap, store=store)
         profile = getattr(config, "firefoxProfileRootDir", "")
         locked = bool(profile and is_profile_locked(profile))

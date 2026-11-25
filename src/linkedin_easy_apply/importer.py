@@ -3,9 +3,28 @@
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime
 from glob import glob
 
 from linkedin_easy_apply.store import Store, extract_job_id, status_from_result
+
+
+def applied_stamp_from_log_path(path: str) -> str | None:
+    """Local noon on the YYYYMMDD in `Applied Jobs DATA - YYYYMMDD.txt`.
+
+    Using the filename date keeps a historical import off today's daily cap.
+    Noon local avoids a UTC date shift around midnight.
+    """
+    match = re.search(r"(\d{8})", os.path.basename(path))
+    if not match:
+        return None
+    try:
+        day = datetime.strptime(match.group(1), "%Y%m%d")
+    except ValueError:
+        return None
+    local_tz = datetime.now().astimezone().tzinfo
+    return day.replace(hour=12, tzinfo=local_tz).isoformat(timespec="seconds")
 
 
 def parse_log_line(line: str) -> dict[str, str] | None:
@@ -47,6 +66,7 @@ def import_text_logs(store: Store, data_dir: str = "data") -> int:
                 lines = handle.readlines()
         except OSError:
             continue
+        stamp = applied_stamp_from_log_path(path)
         for line in lines:
             parsed = parse_log_line(line)
             if not parsed:
@@ -60,6 +80,7 @@ def import_text_logs(store: Store, data_dir: str = "data") -> int:
                 url=parsed["url"],
                 status=parsed["status"],
                 reason=parsed["reason"],
+                applied_at=stamp if parsed["status"] == "applied" else None,
             )
             imported += 1
     return imported

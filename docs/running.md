@@ -145,7 +145,11 @@ consume quota. The daily counter uses the operator's **local calendar date**
 
 SQLite `operator_settings` overrides the two cap integers when set from
 **Settings → Caps**. `.env` remains the fallback. Daily count is the operator's
-**local calendar date**.
+**local calendar date**. The cap uses the larger of `data/application_quota.json`
+and SQLite rows with status `applied` on that local date, so an imported text
+log cannot leave the file at zero while the database already shows today's
+applies. Historical log files are dated from their `YYYYMMDD` name and do not
+count as today. Caps are not raised.
 
 A job left in `needs_review` is opened again on a later run only after that
 question has an approved answer, or a work-history / start-date value exists
