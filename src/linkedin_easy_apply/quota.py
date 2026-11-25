@@ -36,8 +36,16 @@ def save_quota(payload: dict[str, Any], path: str = DEFAULT_QUOTA_PATH) -> None:
         json.dump(payload, handle)
 
 
-def applications_today(path: str = DEFAULT_QUOTA_PATH) -> int:
-    return int(load_quota(path)["count"])
+def applications_today(path: str = DEFAULT_QUOTA_PATH, store: Any | None = None) -> int:
+    """Stricter of the quota file and SQLite applies for the local day.
+
+    Imported text logs update jobs and leave application_quota.json alone.
+    Counting only the file lets a day continue past the cap.
+    """
+    file_count = int(load_quota(path)["count"])
+    if store is None:
+        return file_count
+    return max(file_count, int(store.count_applied_on_local_day()))
 
 
 def record_application(path: str = DEFAULT_QUOTA_PATH) -> int:
@@ -64,5 +72,5 @@ def remaining_applications(
     run_cap = int(caps["max_per_run"])
     day_cap = int(caps["max_per_day"])
     run_left = max(0, run_cap - applied_this_run)
-    day_left = max(0, day_cap - applications_today(path))
+    day_left = max(0, day_cap - applications_today(path, store=store))
     return min(run_left, day_left)

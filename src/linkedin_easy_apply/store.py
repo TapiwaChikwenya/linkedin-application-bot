@@ -244,6 +244,20 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def local_date_of(stamp: str) -> str | None:
+    """Local calendar date of an ISO timestamp. Naive stamps are treated as UTC."""
+    text = (stamp or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().date().isoformat()
+
+
 def normalize_question_key(text: str) -> str:
     return normalize_question(text)
 
@@ -601,6 +615,24 @@ class Store:
         ).fetchone()
         return int(row["n"] if row else 0)
 
+    def count_applied_on_local_day(self, day: str | None = None) -> int:
+        """Applied jobs whose applied_at falls on the operator's local date.
+
+        The quota file and this table can diverge: the text-log importer writes
+        jobs and does not touch application_quota.json. The daily cap uses the
+        larger of the two counts.
+        """
+        target = day or datetime.now(timezone.utc).astimezone().date().isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT applied_at FROM jobs
+            WHERE status = 'applied'
+              AND applied_at IS NOT NULL
+              AND applied_at != ''
+            """
+        ).fetchall()
+        return sum(1 for row in rows if local_date_of(str(row["applied_at"])) == target)
+
     def current_run(self) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
@@ -645,6 +677,7 @@ class Store:
         html_path: str = "",
         fit_score: float | None = None,
         metrics_json: str = "",
+        applied_at: str | None = None,
     ) -> None:
         if not job_id:
             return
@@ -652,7 +685,17 @@ class Store:
             "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         now = utc_now()
-        applied_at = now if status == "applied" else (existing["applied_at"] if existing else None)
+        # Keep the first applied_at. A later import must not move yesterday's
+        # apply onto today and burn the daily cap.
+        if status == "applied":
+            if existing and existing["applied_at"]:
+                applied_stamp = existing["applied_at"]
+            elif applied_at:
+                applied_stamp = applied_at
+            else:
+                applied_stamp = now
+        else:
+            applied_stamp = existing["applied_at"] if existing else None
         metrics = self._job_metric_values(
             existing,
             title=title,
@@ -704,7 +747,7 @@ class Store:
                     screenshot_path,
                     html_path,
                     fit_score,
-                    applied_at,
+                    applied_stamp,
                     run_id,
                     metrics["metrics_json"],
                     job_id,
@@ -737,7 +780,7 @@ class Store:
                     screenshot_path,
                     html_path,
                     now,
-                    applied_at,
+                    applied_stamp,
                     run_id,
                     metrics["metrics_json"],
                 ),
@@ -2166,6 +2209,7 @@ def _bind_store_connections() -> None:
         setattr(Store, name, _store_tx(True)(getattr(Store, name)))
     for name in (
         "count_jobs",
+        "count_applied_on_local_day",
         "current_run",
         "running_run",
         "crashed_resume_job_id",

@@ -85,11 +85,17 @@ def _print_startup_banner() -> None:
     import config
     from linkedin_easy_apply.pacing import normalize_pace
     from linkedin_easy_apply.quota import applications_today, remaining_applications
+    from linkedin_easy_apply.store import Store
 
     pace = normalize_pace(getattr(config, "pace", "human"))
     run_cap = int(getattr(config, "max_applications_per_run", 12))
     day_cap = int(getattr(config, "max_applications_per_day", 25))
-    remaining = remaining_applications(0, run_cap, day_cap)
+    store = Store()
+    try:
+        remaining = remaining_applications(0, run_cap, day_cap, store=store)
+        already = applications_today(store=store)
+    finally:
+        store.close()
     print("LinkedIn Easy Apply")
     print("Pace: " + pace)
     print(
@@ -98,7 +104,7 @@ def _print_startup_banner() -> None:
         + " this run, "
         + str(day_cap)
         + " today ("
-        + str(applications_today())
+        + str(already)
         + " already recorded today, "
         + str(remaining)
         + " remaining)."
