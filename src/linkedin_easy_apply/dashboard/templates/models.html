@@ -19,10 +19,10 @@
       </section>
       <section class="memory-panel">
         <h2>Caps</h2>
-        <p class="muted">Daily and per-run apply limits. Worker reads these instead of only env/config.</p>
+        <p class="muted">Daily and per-run apply limits. The shipped ceilings are 25 a day and 12 a run. You can lower them. LinkedIn also limits Easy Apply speed, and this console does not raise the ceilings.</p>
         <div class="toolbar">
-          <label class="muted">Day <input id="dayCap" type="number" min="0" max="500" style="width:8ch"></label>
-          <label class="muted">Run <input id="runCap" type="number" min="0" max="500" style="width:8ch"></label>
+          <label class="muted">Day <input id="dayCap" type="number" min="0" max="25" style="width:8ch"></label>
+          <label class="muted">Run <input id="runCap" type="number" min="0" max="12" style="width:8ch"></label>
           <button id="saveCapsBtn" class="btn-ghost" type="button">Save caps</button>
           <span class="muted" id="capStatus"></span>
         </div>

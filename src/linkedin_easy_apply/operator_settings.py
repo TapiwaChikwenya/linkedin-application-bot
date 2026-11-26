@@ -13,7 +13,12 @@ from linkedin_easy_apply.store import Store, default_store_path
 
 DEFAULT_RUN_CAP = 12
 DEFAULT_DAY_CAP = 25
-MAX_CAP = 500
+# Shipped ceilings. LinkedIn publishes a daily Easy Apply limit and a speed
+# limit and does not publish a higher allowance. Settings and env values above
+# these are rejected or clamped. Lower values still work.
+MAX_RUN_CAP = DEFAULT_RUN_CAP
+MAX_DAY_CAP = DEFAULT_DAY_CAP
+MAX_CAP = MAX_DAY_CAP
 MAX_SUMMARY_CHARS = 2000
 MAX_SNIPPET_CHARS = 500
 RESUME_MAX_BYTES = 10 * 1024 * 1024
@@ -106,16 +111,35 @@ def normalize_model_name(value: str) -> str:
     return name
 
 
-def _positive_int(value: Any) -> int | None:
+def _bounded_int(value: Any, ceiling: int) -> int | None:
     if value is None or value == "":
         return None
     try:
         number = int(value)
     except (TypeError, ValueError):
         return None
-    if number < 0:
+    if isinstance(value, bool) or number < 0:
         return None
-    return min(number, MAX_CAP)
+    return min(number, ceiling)
+
+
+def require_cap(value: Any, ceiling: int, label: str) -> int:
+    """Accept a cap the operator typed. Above the shipped ceiling is an error."""
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be a whole number")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a whole number") from exc
+    if number < 0:
+        raise ValueError(f"{label} cannot be negative")
+    if number > ceiling:
+        raise ValueError(
+            f"{label} cannot exceed {ceiling}. "
+            "LinkedIn limits how many Easy Apply submissions you can send, and how fast. "
+            "This assistant does not raise the shipped cap."
+        )
+    return number
 
 
 def resolve_application_caps(
@@ -125,20 +149,24 @@ def resolve_application_caps(
     fallback_day: int | None = None,
 ) -> dict[str, int]:
     settings = load_operator_settings(store)
-    run_cap = _positive_int(settings.get(SETTING_RUN_CAP))
-    day_cap = _positive_int(settings.get(SETTING_DAY_CAP))
+    run_cap = _bounded_int(settings.get(SETTING_RUN_CAP), MAX_RUN_CAP)
+    day_cap = _bounded_int(settings.get(SETTING_DAY_CAP), MAX_DAY_CAP)
     if run_cap is None:
-        run_cap = _positive_int(fallback_run)
+        run_cap = _bounded_int(fallback_run, MAX_RUN_CAP)
     if day_cap is None:
-        day_cap = _positive_int(fallback_day)
+        day_cap = _bounded_int(fallback_day, MAX_DAY_CAP)
     if run_cap is None or day_cap is None:
         import config as default_config
 
         cfg = config_module or default_config
         if run_cap is None:
-            run_cap = _positive_int(getattr(cfg, "max_applications_per_run", DEFAULT_RUN_CAP))
+            run_cap = _bounded_int(
+                getattr(cfg, "max_applications_per_run", DEFAULT_RUN_CAP), MAX_RUN_CAP
+            )
         if day_cap is None:
-            day_cap = _positive_int(getattr(cfg, "max_applications_per_day", DEFAULT_DAY_CAP))
+            day_cap = _bounded_int(
+                getattr(cfg, "max_applications_per_day", DEFAULT_DAY_CAP), MAX_DAY_CAP
+            )
     return {
         "max_per_run": int(run_cap if run_cap is not None else DEFAULT_RUN_CAP),
         "max_per_day": int(day_cap if day_cap is not None else DEFAULT_DAY_CAP),

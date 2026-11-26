@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 
 from linkedin_easy_apply.llm import chat_complete, clear_status_cache, list_remote_models
 from linkedin_easy_apply.operator_settings import (
+    MAX_DAY_CAP,
+    MAX_RUN_CAP,
     MAX_SNIPPET_CHARS,
     MAX_SUMMARY_CHARS,
     RESUME_MAX_BYTES,
@@ -33,6 +35,7 @@ from linkedin_easy_apply.operator_settings import (
     parse_work_history,
     public_operator_settings,
     redact_secrets,
+    require_cap,
     resolved_ollama_model,
     resolved_resume_path,
     resume_dir,
@@ -123,14 +126,20 @@ def register_operator_routes(
                 else body.get("day_cap", body.get("max_per_day"))
             )
             if day_value is not None and day_value != "":
-                store.set_setting(SETTING_DAY_CAP, str(int(day_value)))
+                store.set_setting(
+                    SETTING_DAY_CAP,
+                    str(require_cap(day_value, MAX_DAY_CAP, "Daily cap")),
+                )
             run_value = (
                 body.get("max_applications_per_run")
                 if "max_applications_per_run" in body
                 else body.get("run_cap", body.get("max_per_run"))
             )
             if run_value is not None and run_value != "":
-                store.set_setting(SETTING_RUN_CAP, str(int(run_value)))
+                store.set_setting(
+                    SETTING_RUN_CAP,
+                    str(require_cap(run_value, MAX_RUN_CAP, "Run cap")),
+                )
             if "applicant_summary" in body:
                 store.set_setting(
                     SETTING_SUMMARY,
