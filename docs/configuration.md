@@ -148,8 +148,8 @@ remains the fallback when SQLite has no override.
 | `ollama_model` | Overrides `OLLAMA_MODEL`. Names must look like `llama3.2` |
 | `resume_path` | Absolute local PDF path used when the file still exists |
 | `applicant_summary` | Extra truthful facts (capped at 2000 chars) |
-| `max_applications_per_run` | Integer cap, max 500 |
-| `max_applications_per_day` | Integer cap, max 500, **local** calendar day |
+| `max_applications_per_run` | Integer cap, ceiling 12 (the shipped default) |
+| `max_applications_per_day` | Integer cap, ceiling 25, **local** calendar day |
 | `schedule_windows` | JSON list of `{days, start, end}`. Empty = manual Start only |
 
 `days` are Monday=0 … Sunday=6 (names `mon`…`sun` also parse). `start` / `end`
@@ -185,7 +185,7 @@ flowchart TD
 - Invalid model name is rejected by `normalize_model_name`.
 - Resume override is ignored when the path is missing; config fallback is used.
 - Invalid schedule JSON reports `reason: invalid schedule` and does not auto-start.
-- Caps above 500 are clamped. Missing keys keep env defaults.
+- Caps above 12 per run or 25 per day are rejected on save and clamped when an older SQLite or env value is read. Missing keys keep the shipped defaults. LinkedIn's own daily and speed limits still apply.
 - Pytest does not open the real `data/assistant.sqlite` unless `LINKEDIN_STORE_PATH` is set.
 
 ### Security considerations

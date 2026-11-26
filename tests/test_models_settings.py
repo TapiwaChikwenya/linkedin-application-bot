@@ -390,6 +390,13 @@ def test_caps_and_schedule_settings_persist(tmp_path):
     assert status["quota"]["day_cap"] == 7
     assert status["quota"]["run_cap"] == 3
     assert status["schedule"]["enabled"] is True
+    raised = client.post(
+        "/api/settings",
+        json={"max_applications_per_day": 80, "max_applications_per_run": 40},
+    )
+    assert raised.status_code == 400
+    assert "cannot exceed" in raised.json()["detail"]
+    assert store.get_setting("max_applications_per_day") == "7"
     cleared = client.post("/api/settings", json={"schedule_windows": []})
     assert cleared.status_code == 200
     assert cleared.json()["schedule"]["enabled"] is False

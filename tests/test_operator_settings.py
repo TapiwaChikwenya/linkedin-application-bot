@@ -1,12 +1,32 @@
 from datetime import datetime, timezone
 
 from linkedin_easy_apply.operator_settings import (
+    MAX_DAY_CAP,
+    MAX_RUN_CAP,
     normalize_windows,
+    require_cap,
+    resolve_application_caps,
     schedule_status,
 )
 from linkedin_easy_apply.quota import record_application, remaining_applications
 from linkedin_easy_apply.scheduler import RunScheduler
 from linkedin_easy_apply.store import Store
+
+
+def test_stored_caps_cannot_exceed_the_shipped_ceilings(tmp_path):
+    store = Store(str(tmp_path / "assistant.sqlite"))
+    store.set_setting("max_applications_per_day", "80")
+    store.set_setting("max_applications_per_run", "40")
+    caps = resolve_application_caps(store=store, fallback_run=12, fallback_day=25)
+    assert caps["max_per_day"] == MAX_DAY_CAP
+    assert caps["max_per_run"] == MAX_RUN_CAP
+    assert require_cap(7, MAX_DAY_CAP, "Daily cap") == 7
+    try:
+        require_cap(80, MAX_DAY_CAP, "Daily cap")
+    except ValueError as exc:
+        assert "cannot exceed 25" in str(exc)
+    else:
+        raise AssertionError("a daily cap above 25 must be rejected")
 
 
 def test_remaining_applications_uses_operator_override(tmp_path):
