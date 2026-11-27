@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -368,18 +368,44 @@ def normalize_windows(raw: Any) -> list[dict[str, Any]]:
 
 
 def _window_contains(now: datetime, window: dict[str, Any]) -> bool:
-    if now.weekday() not in set(window.get("days") or []):
-        return False
+    """Whether local ``now`` sits inside one saved window.
+
+    Same-day windows require today's weekday. A window that crosses midnight
+    (22:00–06:00) keeps the evening on the listed day and the morning on the
+    next calendar day. Caps are unchanged; this only makes the saved window true.
+    """
+    days = set(window.get("days") or [])
     start = parse_hhmm(str(window.get("start") or "00:00"))
     end = parse_hhmm(str(window.get("end") or "00:00"))
     current = now.time().replace(second=0, microsecond=0)
-    if start == end:
+    if start == end or not days:
         return False
+    weekday = now.weekday()
     if start < end:
+        if weekday not in days:
+            return False
         if end.hour == 23 and end.minute == 59:
             return start <= current
         return start <= current < end
-    return current >= start or current < end
+    if current >= start and weekday in days:
+        return True
+    previous = (weekday - 1) % 7
+    return current < end and previous in days
+
+
+def _window_session_date(now: datetime, window: dict[str, Any]):
+    """Date that identifies one open window, including the morning after midnight.
+
+    The scheduler treats a new key as a new session. Anchoring the morning tail
+    to the previous date keeps a finished overnight run from starting again at
+    00:00, which would be a second run inside the window the operator saved.
+    """
+    start = parse_hhmm(str(window.get("start") or "00:00"))
+    end = parse_hhmm(str(window.get("end") or "00:00"))
+    current = now.time().replace(second=0, microsecond=0)
+    if start > end and current < end:
+        return now.date() - timedelta(days=1)
+    return now.date()
 
 
 def schedule_status(
@@ -419,7 +445,7 @@ def schedule_status(
     active_window = next((item for item in parsed if _window_contains(current, item)), None)
     if active_window:
         key = (
-            current.date().isoformat()
+            _window_session_date(current, active_window).isoformat()
             + "|"
             + ",".join(str(day) for day in active_window["days"])
             + "|"

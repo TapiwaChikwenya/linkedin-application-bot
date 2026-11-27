@@ -47,6 +47,41 @@ def test_schedule_window_excludes_evening_and_weekend():
     assert saturday["active"] is False
 
 
+def test_overnight_window_includes_the_next_morning_as_one_session():
+    windows = normalize_windows([{"days": [4], "start": "22:00", "end": "06:00"}])
+    friday_night = schedule_status(
+        now=datetime(2026, 9, 18, 23, 15, tzinfo=timezone.utc),
+        windows=windows,
+    )
+    saturday_morning = schedule_status(
+        now=datetime(2026, 9, 19, 5, 30, tzinfo=timezone.utc),
+        windows=windows,
+    )
+    saturday_after = schedule_status(
+        now=datetime(2026, 9, 19, 6, 0, tzinfo=timezone.utc),
+        windows=windows,
+    )
+    assert friday_night["active"] is True
+    assert saturday_morning["active"] is True
+    assert friday_night["window_key"].startswith("2026-09-18|")
+    assert saturday_morning["window_key"] == friday_night["window_key"]
+    assert saturday_after["active"] is False
+
+
+def test_overnight_morning_does_not_use_the_next_listed_day():
+    windows = normalize_windows([{"days": [5], "start": "22:00", "end": "06:00"}])
+    saturday_morning = schedule_status(
+        now=datetime(2026, 9, 19, 5, 30, tzinfo=timezone.utc),
+        windows=windows,
+    )
+    saturday_night = schedule_status(
+        now=datetime(2026, 9, 19, 22, 30, tzinfo=timezone.utc),
+        windows=windows,
+    )
+    assert saturday_morning["active"] is False
+    assert saturday_night["active"] is True
+
+
 def test_empty_schedule_is_manual_only():
     status = schedule_status(now=datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc), windows=[])
     assert status["enabled"] is False
