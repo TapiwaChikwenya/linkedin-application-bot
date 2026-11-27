@@ -154,7 +154,10 @@ remains the fallback when SQLite has no override.
 
 `days` are Monday=0 … Sunday=6 (names `mon`…`sun` also parse). `start` / `end`
 are `HH:MM`. Comparison uses `datetime.now().astimezone()` — the operator's
-**local timezone**, not UTC. A window with `start == end` is inactive.
+**local timezone**, not UTC. A window with `start == end` is inactive. A window
+whose end is earlier than its start crosses midnight: Friday 22:00–06:00 stays
+open until Saturday 06:00, and that stretch is one scheduler session so a
+finished run does not start again at 00:00. Daily and per-run caps are unchanged.
 
 Resolution order: SQLite override if valid, else `.env` / `config.py` defaults
 (12 / 25, `llama3.2`, `LINKEDIN_RESUME_PATH` or the first `*Resume*.pdf` in the
