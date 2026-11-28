@@ -119,7 +119,8 @@ flowchart TD
 Raise Easy Apply completion rate by letting Llama **infer and interpolate**
 grounded leftover answers instead of abandoning the job whenever Ollama omits a
 field. The worker still refuses to invent legal, demographic, salary, clearance,
-or sponsorship facts.
+or sponsorship facts. `applicant_facts` does not add a hardcoded US work-authorization
+Yes or a sponsorship No. Those answers come only from `yes_no_answers` and approved rows.
 
 ### Scope
 
