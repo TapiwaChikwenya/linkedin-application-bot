@@ -129,7 +129,5 @@ def applicant_facts(
         "resume_text": extract_resume_text(resume_path),
         "years_experience": years,
         "yes_no_rules": yes_no,
-        "work_authorization_us": "Yes",
-        "requires_sponsorship": "No",
         "approved_answers": compact_approved_answers(store, questions),
     }

@@ -237,6 +237,8 @@ def test_applicant_facts_include_config_values(monkeypatch, tmp_path):
     assert facts["phone"] == "5550001111"
     assert facts["resume_text"] == ""
     assert facts["approved_answers"] == []
+    assert "work_authorization_us" not in facts
+    assert "requires_sponsorship" not in facts
     assert extract_resume_text("") == ""
 
 
